@@ -1,7 +1,12 @@
 use ash::{Entry, Instance, ext::mesh_shader, vk};
 use bevy_ecs::prelude::Resource;
+use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{
+    Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::error::Error;
+use std::ffi::CStr;
 use winit::window::Window;
 
 #[derive(Resource)]
@@ -32,10 +37,19 @@ pub struct VulkanContext {
 
     pub pipeline_layout: vk::PipelineLayout,
     pub graphics_pipeline: vk::Pipeline,
+
+    pub allocator: std::mem::ManuallyDrop<Allocator>,
+    pub vertex_buffer: vk::Buffer,
+    pub vertex_allocation: Allocation,
+
+    pub descriptor_pool: vk::DescriptorPool,
+    pub descriptor_set_layout: vk::DescriptorSetLayout,
+    pub descriptor_set: vk::DescriptorSet,
 }
 
 impl VulkanContext {
     pub fn new(window: &Window) -> Result<Self, Box<dyn Error>> {
+        tracing::debug!("Starting Vulkan boot sequence...");
         let entry = unsafe { Entry::load()? };
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
@@ -56,6 +70,27 @@ impl VulkanContext {
         let (physical_device, graphics_queue_family_index) = pdevices
             .into_iter()
             .filter_map(|pdevice| {
+                let properties = unsafe { instance.get_physical_device_properties(pdevice) };
+                let device_type = properties.device_type;
+
+                let available_extensions = unsafe {
+                    instance
+                        .enumerate_device_extension_properties(pdevice)
+                        .unwrap_or_default()
+                };
+
+                let has_mesh_shader = available_extensions.iter().any(|ext| unsafe {
+                    CStr::from_ptr(ext.extension_name.as_ptr()) == ash::ext::mesh_shader::NAME
+                });
+                let has_swapchain = available_extensions.iter().any(|ext| unsafe {
+                    CStr::from_ptr(ext.extension_name.as_ptr()) == ash::khr::swapchain::NAME
+                });
+
+                if !has_mesh_shader || !has_swapchain {
+                    return None;
+                }
+
+                // Find a queue family that supports both graphics and presenting to our surface
                 let queue_families =
                     unsafe { instance.get_physical_device_queue_family_properties(pdevice) };
                 let queue_index = queue_families.iter().enumerate().position(|(i, info)| {
@@ -67,11 +102,29 @@ impl VulkanContext {
                     };
                     supports_graphics && supports_surface
                 });
-                queue_index.map(|index| (1000, pdevice, index as u32)) // Simplified for this snippet
+
+                // Score the device so Discrete GPUs are heavily preferred over Integrated
+                if let Some(index) = queue_index {
+                    let mut score = 0;
+
+                    if device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+                        score += 1000;
+                    } else if device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
+                        score += 100;
+                    }
+
+                    Some((score, pdevice, index as u32))
+                } else {
+                    None
+                }
             })
             .max_by_key(|&(score, _, _)| score)
             .map(|(_, pdevice, index)| (pdevice, index))
-            .unwrap();
+            .expect("Failed to find a suitable physical device with Mesh Shader support");
+
+        let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+        tracing::info!("Selected Physical Device: {:?}", device_name);
 
         let queue_priorities = [1.0];
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
@@ -148,6 +201,7 @@ impl VulkanContext {
         let swapchain_ext = ash::khr::swapchain::Device::new(&instance, &device);
         let swapchain = unsafe { swapchain_ext.create_swapchain(&create_info, None)? };
         let swapchain_images = unsafe { swapchain_ext.get_swapchain_images(swapchain)? };
+        tracing::debug!("Swapchain Created with {} images.", swapchain_images.len());
 
         let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
             .iter()
@@ -183,6 +237,117 @@ impl VulkanContext {
         let image_available_semaphore = unsafe { device.create_semaphore(&sempahore_info, None)? };
         let render_finished_semaphore = unsafe { device.create_semaphore(&sempahore_info, None)? };
         let in_flight_fence = unsafe { device.create_fence(&fence_info, None)? };
+
+        // ## Memory Allocator ##
+        let mut allocator = Allocator::new(&AllocatorCreateDesc {
+            instance: instance.clone(),
+            device: device.clone(),
+            physical_device,
+            debug_settings: Default::default(),
+            buffer_device_address: false,
+            allocation_sizes: Default::default(),
+        })
+        .expect("Failed to create GPU allocator");
+
+        // ## Vertex Data & Buffer ##
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Vertex {
+            position: [f32; 4],
+            color: [f32; 4],
+        }
+
+        let vertices = [
+            Vertex {
+                position: [0.0, -0.5, 0.0, 1.0],
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, 0.0, 1.0],
+                color: [0.0, 1.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, 0.0, 1.0],
+                color: [0.0, 0.0, 1.0, 1.0],
+            },
+        ];
+        let buffer_size = std::mem::size_of_val(&vertices) as u64;
+
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(buffer_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let vertex_buffer = unsafe { device.create_buffer(&buffer_info, None)? };
+
+        let requirements = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
+        let vertex_allocation = allocator.allocate(&AllocationCreateDesc {
+            name: "Triangle Vertex Buffer",
+            requirements,
+            location: MemoryLocation::CpuToGpu, // CPU accessible, GPU visible
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+
+        unsafe {
+            device.bind_buffer_memory(
+                vertex_buffer,
+                vertex_allocation.memory(),
+                vertex_allocation.offset(),
+            )?
+        };
+
+        // Copy our Rust array into the mapped GPU memory
+        if let Some(mapped_ptr) = vertex_allocation.mapped_ptr() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    vertices.as_ptr() as *const u8,
+                    mapped_ptr.as_ptr() as *mut u8,
+                    buffer_size as usize,
+                );
+            }
+        }
+
+        // ## Descriptor Set Layout & Pool ##
+        let binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::MESH_EXT);
+
+        let layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1);
+
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(std::slice::from_ref(&pool_size))
+            .max_sets(1);
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
+
+        // ## Allocate & Update Descriptor Set ##
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&alloc_info)?[0] };
+
+        let desc_buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(vertex_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(std::slice::from_ref(&desc_buffer_info));
+
+        unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
+
+        tracing::debug!("Vertex Buffer allocated and Descriptor Set created.");
 
         // ## Pipeline ##
         let mesh_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/shader.mesh.spv"));
@@ -225,7 +390,8 @@ impl VulkanContext {
         let color_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
-        let layout_info = vk::PipelineLayoutCreateInfo::default();
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
         let color_attachment_formats = [format.format];
@@ -248,12 +414,14 @@ impl VulkanContext {
                 .unwrap()[0]
         };
 
+        tracing::info!("Mesh Shader Pipeline compiled successfully.");
+
         unsafe {
             device.destroy_shader_module(mesh_module, None);
             device.destroy_shader_module(frag_module, None);
         }
 
-        tracing::info!("Vulkan Context and Mesh Pipeline Created successfully.");
+        tracing::info!("Vulkan Context fully initialized");
 
         Ok(Self {
             entry,
@@ -278,6 +446,12 @@ impl VulkanContext {
             in_flight_fence,
             pipeline_layout,
             graphics_pipeline,
+            allocator: std::mem::ManuallyDrop::new(allocator),
+            vertex_buffer,
+            vertex_allocation,
+            descriptor_pool,
+            descriptor_set_layout,
+            descriptor_set,
         })
     }
 
@@ -357,6 +531,15 @@ impl VulkanContext {
                 self.graphics_pipeline,
             );
 
+            device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                std::slice::from_ref(&self.descriptor_set),
+                &[],
+            );
+
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -418,5 +601,43 @@ impl VulkanContext {
             swapchain_ext.queue_present(self.graphics_queue, &present_info)?;
         }
         Ok(())
+    }
+}
+
+impl Drop for VulkanContext {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.device.device_wait_idle();
+
+            std::mem::ManuallyDrop::drop(&mut self.allocator);
+
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+
+            self.device.destroy_pipeline(self.graphics_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+
+            self.device.destroy_fence(self.in_flight_fence, None);
+            self.device
+                .destroy_semaphore(self.render_finished_semaphore, None);
+            self.device
+                .destroy_semaphore(self.image_available_semaphore, None);
+
+            self.device.destroy_command_pool(self.command_pool, None);
+
+            for &view in &self.swapchain_image_views {
+                self.device.destroy_image_view(view, None);
+            }
+
+            self.swapchain_ext.destroy_swapchain(self.swapchain, None);
+            self.device.destroy_device(None);
+            self.surface_ext.destroy_surface(self.surface, None);
+            self.instance.destroy_instance(None);
+
+            tracing::info!("Vulkan Context destroyed cleanly.");
+        }
     }
 }

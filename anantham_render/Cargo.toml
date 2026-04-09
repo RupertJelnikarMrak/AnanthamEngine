@@ -11,6 +11,7 @@ raw-window-handle = { workspace = true }
 bevy_ecs = { workspace = true }
 winit = { workspace = true }
 tracing = { workspace = true }
+gpu-allocator = { workspace = true }
 
 [build-dependencies]
 shaderc = { workspace = true }
