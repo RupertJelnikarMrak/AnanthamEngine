@@ -75,8 +75,10 @@ version = "0.1.0"
 dependencies = [
  "anantham_core",
  "anantham_render",
+ "bevy_ecs",
  "glam 0.32.1",
  "tracing-subscriber",
+ "winit",
 ]
 
 [[package]]

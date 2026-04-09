@@ -1,10 +1,12 @@
 use crate::app::App;
+use crate::input::Input;
 use bevy_ecs::prelude::Resource;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::PhysicalKey,
     window::{Window, WindowId},
 };
 
@@ -58,6 +60,22 @@ impl ApplicationHandler for EngineRunner {
             WindowEvent::CloseRequested => {
                 tracing::info!("Shutting down engine...");
                 event_loop.exit();
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(keycode),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(mut input) = self.app.main_world.get_resource_mut::<Input>() {
+                    match state {
+                        ElementState::Pressed => input.press(keycode),
+                        ElementState::Released => input.release(keycode),
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 // Execute the full game and render loop

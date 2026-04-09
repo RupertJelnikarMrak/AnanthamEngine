@@ -18,8 +18,10 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let mut main_world = World::new();
+        main_world.insert_resource(crate::input::Input::default());
         Self {
-            main_world: World::new(),
+            main_world,
             render_world: World::new(),
             main_schedule: Schedule::default(),
             extract_systems: Vec::new(),

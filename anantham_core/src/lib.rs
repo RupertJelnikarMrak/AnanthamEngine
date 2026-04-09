@@ -1,6 +1,7 @@
 pub mod app;
 pub mod components;
 pub mod extract;
+pub mod input;
 pub mod log;
 pub mod runner;
 

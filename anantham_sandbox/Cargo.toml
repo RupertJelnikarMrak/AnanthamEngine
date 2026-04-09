@@ -8,3 +8,5 @@ tracing-subscriber = { workspace = true }
 anantham_core = { workspace = true }
 anantham_render = { workspace = true }
 glam = { workspace = true }
+bevy_ecs = { workspace = true }
+winit = { workspace = true }
