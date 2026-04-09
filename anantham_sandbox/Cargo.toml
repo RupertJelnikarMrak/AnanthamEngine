@@ -1,0 +1,9 @@
+[package]
+name = "anantham_sandbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing-subscriber = { workspace = true }
+anantham_core = { workspace = true }
+anantham_render = { workspace = true }

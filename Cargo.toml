@@ -1,6 +1,22 @@
-[package]
-name = "anantham"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["anantham_core", "anantham_render", "anantham_sandbox"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
+ash = "0.38.0"
+ash-window = "0.13.0"
+anantham_core = { path = "anantham_core" }
+anantham_render = { path = "anantham_render" }
+raw-window-handle = "0.6.2"
+winit = "0.30.13"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+shaderc = "0.10.1"
+glam = "0.32.1"
+bevy_ecs = "0.18.1"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
