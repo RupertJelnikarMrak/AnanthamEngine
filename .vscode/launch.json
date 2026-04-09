@@ -1,0 +1,45 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Sandbox",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--package=sandbox"
+                ],
+                "filter": {
+                    "name": "sandbox",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Editor",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--package=editor"
+                ],
+                "filter": {
+                    "name": "editor",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ]
+        }
+    ]
+}
