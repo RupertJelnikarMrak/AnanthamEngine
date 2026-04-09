@@ -1,5 +1,7 @@
+use anantham_core::components::ExtractedView;
 use ash::{Entry, Instance, ext::mesh_shader, vk};
 use bevy_ecs::prelude::Resource;
+use glam::Mat4;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{
     Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
@@ -40,7 +42,7 @@ pub struct VulkanContext {
 
     pub allocator: std::mem::ManuallyDrop<Allocator>,
     pub vertex_buffer: vk::Buffer,
-    pub vertex_allocation: Allocation,
+    pub vertex_allocation: Option<Allocation>,
 
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
@@ -259,15 +261,15 @@ impl VulkanContext {
 
         let vertices = [
             Vertex {
-                position: [0.0, -0.5, 0.0, 1.0],
+                position: [0.0, 0.5, 0.0, 1.0],
                 color: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
-                position: [0.5, 0.5, 0.0, 1.0],
+                position: [0.5, -0.5, 0.0, 1.0],
                 color: [0.0, 1.0, 0.0, 1.0],
             },
             Vertex {
-                position: [-0.5, 0.5, 0.0, 1.0],
+                position: [-0.5, -0.5, 0.0, 1.0],
                 color: [0.0, 0.0, 1.0, 1.0],
             },
         ];
@@ -381,7 +383,7 @@ impl VulkanContext {
         let rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE);
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -390,8 +392,13 @@ impl VulkanContext {
         let color_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
+        let push_contant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::MESH_EXT)
+            .offset(0)
+            .size(std::mem::size_of::<glam::Mat4>() as u32);
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_contant_range));
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
         let color_attachment_formats = [format.format];
@@ -448,14 +455,17 @@ impl VulkanContext {
             graphics_pipeline,
             allocator: std::mem::ManuallyDrop::new(allocator),
             vertex_buffer,
-            vertex_allocation,
+            vertex_allocation: Some(vertex_allocation),
             descriptor_pool,
             descriptor_set_layout,
             descriptor_set,
         })
     }
 
-    pub fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn draw_frame(
+        &mut self,
+        extracted_view: Option<&ExtractedView>,
+    ) -> Result<(), Box<dyn Error>> {
         let device = &self.device;
         let swapchain_ext = &self.swapchain_ext;
 
@@ -540,6 +550,11 @@ impl VulkanContext {
                 &[],
             );
 
+            let view_proj = extracted_view
+                .map(|v| v.view_projection)
+                .unwrap_or(Mat4::IDENTITY);
+            let matrix_bytes = bytemuck::bytes_of(&view_proj);
+
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -555,6 +570,14 @@ impl VulkanContext {
                 extent: self.swapchain_extent,
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+
+            device.cmd_push_constants(
+                self.command_buffer,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::MESH_EXT,
+                0,
+                matrix_bytes,
+            );
 
             self.mesh_ext
                 .cmd_draw_mesh_tasks(self.command_buffer, 1, 1, 1);
@@ -608,6 +631,11 @@ impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+
+            if let Some(alloc) = self.vertex_allocation.take() {
+                self.allocator.free(alloc).unwrap();
+            }
+            self.device.destroy_buffer(self.vertex_buffer, None);
 
             std::mem::ManuallyDrop::drop(&mut self.allocator);
 

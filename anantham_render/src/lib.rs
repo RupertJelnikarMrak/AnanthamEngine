@@ -1,6 +1,6 @@
 pub mod context;
 
-use anantham_core::{App, AppWindow, Plugin};
+use anantham_core::{App, AppWindow, Plugin, components::ExtractedView};
 use bevy_ecs::prelude::*;
 use context::VulkanContext;
 
@@ -30,8 +30,13 @@ fn initialize_vulkan_system(
     }
 }
 
-fn draw_frame_system(vulkan_context: Option<ResMut<VulkanContext>>) {
+fn draw_frame_system(
+    vulkan_context: Option<ResMut<VulkanContext>>,
+    extracted_view: Option<Res<ExtractedView>>,
+) {
     if let Some(mut context) = vulkan_context {
-        context.draw_frame().expect("Failed to draw frame");
+        context
+            .draw_frame(extracted_view.as_deref())
+            .expect("Failed to draw frame");
     }
 }

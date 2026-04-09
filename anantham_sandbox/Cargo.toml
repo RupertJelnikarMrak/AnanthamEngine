@@ -7,3 +7,4 @@ edition = "2024"
 tracing-subscriber = { workspace = true }
 anantham_core = { workspace = true }
 anantham_render = { workspace = true }
+glam = { workspace = true }
