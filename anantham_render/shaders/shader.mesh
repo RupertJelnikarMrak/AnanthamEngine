@@ -20,16 +20,17 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) out vec4 outColor[];
+layout(location = 1) out vec3 outPos[]; // <-- NEW: Pass the local position
 
 void main() {
     uint iid = gl_LocalInvocationID.x;
     uint gid = gl_WorkGroupID.x;
-
     uint absolute_index = pc.vertex_offset + (gid * 3) + iid;
     Vertex v = vertices[absolute_index];
 
     gl_MeshVerticesEXT[iid].gl_Position = pc.mvp * v.position;
     outColor[iid] = v.color;
+    outPos[iid] = v.position.xyz; // <-- NEW: Extract the raw XYZ
 
     if (iid == 0) {
         gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
