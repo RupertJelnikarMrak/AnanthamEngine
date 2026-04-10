@@ -1,4 +1,4 @@
-use bevy_ecs::prelude::{Component, Resource};
+use bevy_ecs::prelude::Component;
 use glam::{Mat4, Quat, Vec3};
 
 #[derive(Component, Clone, Copy)]
@@ -19,9 +19,4 @@ pub struct Camera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
-}
-
-#[derive(Resource, Clone, Copy)]
-pub struct ExtractedView {
-    pub view_projection: Mat4,
 }

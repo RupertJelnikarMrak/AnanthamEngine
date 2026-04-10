@@ -1,6 +1,6 @@
 pub mod context;
 
-use anantham_core::{App, AppWindow, Plugin, components::ExtractedView};
+use anantham_core::{App, AppWindow, Plugin, render_bridge::components::ExtractedView};
 use bevy_ecs::prelude::*;
 use context::VulkanContext;
 

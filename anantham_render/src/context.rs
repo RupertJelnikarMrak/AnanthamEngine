@@ -1,4 +1,4 @@
-use anantham_core::components::ExtractedView;
+use anantham_core::render_bridge::components::ExtractedView;
 use ash::{Entry, Instance, ext::mesh_shader, vk};
 use bevy_ecs::prelude::Resource;
 use glam::Mat4;

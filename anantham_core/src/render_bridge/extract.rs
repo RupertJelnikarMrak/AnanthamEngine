@@ -1,4 +1,5 @@
-use crate::components::{Camera, ExtractedView, Transform};
+use crate::render_bridge::components::ExtractedView;
+use crate::spatial::{Camera, Transform};
 use bevy_ecs::prelude::*;
 use glam::Mat4;
 
