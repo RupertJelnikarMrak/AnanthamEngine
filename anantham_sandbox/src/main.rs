@@ -123,6 +123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     voxels[Chunk::index(16, 16, 16)] = glass_id;
     voxels[Chunk::index(17, 16, 16)] = glass_id;
+    voxels[Chunk::index(19, 16, 16)] = stone_id;
+    voxels[Chunk::index(20, 16, 16)] = stone_id;
 
     app.main_world.spawn((
         Transform {

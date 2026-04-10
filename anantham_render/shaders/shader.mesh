@@ -7,6 +7,7 @@ layout(triangles, max_vertices = 3, max_primitives = 1) out;
 struct Vertex {
     vec4 position;
     vec4 color;
+    vec4 normal;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer VertexBuffer {
@@ -20,7 +21,7 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) out vec4 outColor[];
-layout(location = 1) out vec3 outPos[]; // <-- NEW: Pass the local position
+layout(location = 1) out vec3 outNormal[];
 
 void main() {
     uint iid = gl_LocalInvocationID.x;
@@ -30,7 +31,7 @@ void main() {
 
     gl_MeshVerticesEXT[iid].gl_Position = pc.mvp * v.position;
     outColor[iid] = v.color;
-    outPos[iid] = v.position.xyz; // <-- NEW: Extract the raw XYZ
+    outNormal[iid] = v.normal.xyz;
 
     if (iid == 0) {
         gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);

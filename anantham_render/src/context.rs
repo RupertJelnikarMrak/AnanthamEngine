@@ -39,6 +39,7 @@ pub struct VulkanContext {
 
     pub pipeline_layout: vk::PipelineLayout,
     pub graphics_pipeline: vk::Pipeline,
+    pub transparent_pipeline: vk::Pipeline,
 
     pub allocator: std::mem::ManuallyDrop<Allocator>,
     pub vertex_buffer: vk::Buffer,
@@ -414,25 +415,8 @@ impl VulkanContext {
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::BACK)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
-        let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS)
-            .depth_bounds_test_enable(false)
-            .stencil_test_enable(false);
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(true)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .alpha_blend_op(vk::BlendOp::ADD);
-        let color_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(std::slice::from_ref(&color_blend_attachment));
 
         let push_contant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::MESH_EXT)
@@ -448,24 +432,97 @@ impl VulkanContext {
             .color_attachment_formats(&color_attachment_formats)
             .depth_attachment_format(depth_format);
 
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        // ==========================================
+        // 1. OPAQUE PIPELINE (Stone/Dirt)
+        // ==========================================
+        let opaque_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(false); // MUST BE FALSE
+
+        let opaque_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(std::slice::from_ref(&opaque_blend_attachment));
+
+        let opaque_depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true) // MUST BE TRUE
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+
+        let opaque_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .viewport_state(&viewport_state_info)
-            .rasterization_state(&rasterization_info)
+            .rasterization_state(&rasterization_info) // Uses BACK culling
             .multisample_state(&multisample_info)
-            .color_blend_state(&color_blend_info)
-            .depth_stencil_state(&depth_stencil_info)
+            .color_blend_state(&opaque_blend_info)
+            .depth_stencil_state(&opaque_depth_stencil_info)
             .dynamic_state(&dynamic_state_info)
             .layout(pipeline_layout)
             .push_next(&mut pipeline_rendering_info);
 
         let graphics_pipeline = unsafe {
             device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[opaque_pipeline_info], None)
                 .unwrap()[0]
         };
 
-        tracing::info!("Mesh Shader Pipeline compiled successfully.");
+        // ==========================================
+        // 2. TRANSPARENT PIPELINE (Glass/Water)
+        // ==========================================
+        let transparent_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true) // MUST BE TRUE
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD);
+
+        let transparent_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(std::slice::from_ref(&transparent_blend_attachment));
+
+        let transparent_depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(false) // MUST BE FALSE
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+
+        // Render targets must be recreated because push_next mutates pointers
+        let mut transparent_rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_attachment_formats)
+            .depth_attachment_format(depth_format);
+
+        // Glass needs NO culling so you can see the inside volume
+        let transparent_rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE) // Disable culling!
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+
+        let transparent_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .viewport_state(&viewport_state_info)
+            .rasterization_state(&transparent_rasterization_info)
+            .multisample_state(&multisample_info)
+            .color_blend_state(&transparent_blend_info)
+            .depth_stencil_state(&transparent_depth_stencil_info)
+            .dynamic_state(&dynamic_state_info)
+            .layout(pipeline_layout)
+            .push_next(&mut transparent_rendering_info);
+
+        let transparent_pipeline = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[transparent_pipeline_info],
+                    None,
+                )
+                .unwrap()[0]
+        };
+
+        tracing::info!("Mesh Shader Pipelines compiled successfully.");
 
         unsafe {
             device.destroy_shader_module(mesh_module, None);
@@ -497,6 +554,7 @@ impl VulkanContext {
             in_flight_fence,
             pipeline_layout,
             graphics_pipeline,
+            transparent_pipeline,
             allocator: std::mem::ManuallyDrop::new(allocator),
             vertex_buffer,
             vertex_allocation: Some(vertex_allocation),
@@ -533,7 +591,35 @@ impl VulkanContext {
                 }
 
                 if !mesh.transparent_vertices.is_empty() {
-                    flattened_vertices.extend(&mesh.transparent_vertices);
+                    let cam_pos_world = extracted_view
+                        .map(|v| v.camera_position)
+                        .unwrap_or(glam::Vec3::ZERO);
+
+                    let local_cam_pos = mesh.transform.inverse().transform_point3(cam_pos_world);
+
+                    let mut triangles = Vec::with_capacity(mesh.transparent_vertices.len() / 3);
+                    for i in (0..mesh.transparent_vertices.len()).step_by(3) {
+                        let v0 = mesh.transparent_vertices[i];
+                        let v1 = mesh.transparent_vertices[i + 1];
+                        let v2 = mesh.transparent_vertices[i + 2];
+
+                        let centroid = (v0.position.truncate()
+                            + v1.position.truncate()
+                            + v2.position.truncate())
+                            / 3.0;
+                        let dist_sq = centroid.distance_squared(local_cam_pos);
+
+                        triangles.push(([v0, v1, v2], dist_sq));
+                    }
+
+                    triangles.sort_unstable_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for (tri, _) in triangles {
+                        flattened_vertices.extend_from_slice(&tri);
+                    }
+
                     let triangle_count = (mesh.transparent_vertices.len() / 3) as u32;
                     transparent_draw_commands.push((
                         mesh.transform,
@@ -658,12 +744,8 @@ impl VulkanContext {
                 .color_attachments(std::slice::from_ref(&color_attachment_info))
                 .depth_attachment(&depth_attachment_info);
 
+            // ## BEGIN RENDER ## //
             device.cmd_begin_rendering(self.command_buffer, &rendering_info);
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.graphics_pipeline,
-            );
 
             device.cmd_bind_descriptor_sets(
                 self.command_buffer,
@@ -690,7 +772,12 @@ impl VulkanContext {
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-            // 1. Draw Opaque First
+            // Bind opaque pipeline and draw opaque first
+            device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.graphics_pipeline,
+            );
             for (model_matrix, vertex_offset, triangle_count) in opaque_draw_commands {
                 let push_constants = MeshPushConstants {
                     mvp: view_proj * model_matrix,
@@ -709,7 +796,12 @@ impl VulkanContext {
                     .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
             }
 
-            // 2. Draw Transparent Last
+            // Bind transparent_pipeline and draw transparent last
+            device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.transparent_pipeline,
+            );
             for (model_matrix, vertex_offset, triangle_count) in transparent_draw_commands {
                 let push_constants = MeshPushConstants {
                     mvp: view_proj * model_matrix,
@@ -728,6 +820,7 @@ impl VulkanContext {
                     .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
             }
 
+            // ## END RENDER ## //
             device.cmd_end_rendering(self.command_buffer);
 
             image_memory_barrier.src_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;

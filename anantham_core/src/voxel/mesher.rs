@@ -100,7 +100,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_back(&mut opaque_vertices, position, color);
+                        add_face_back(target_vertices, position, color);
                     }
                 }
             }
@@ -117,31 +117,45 @@ pub fn chunk_meshing_system(
 /// Pushes two triangles (6 vertices) to form a quad.
 /// The winding order is 0 -> 1 -> 2 and 2 -> 3 -> 0.
 #[inline]
-fn push_quad(vertices: &mut Vec<Vertex>, p0: Vec4, p1: Vec4, p2: Vec4, p3: Vec4, color: Vec4) {
+fn push_quad(
+    vertices: &mut Vec<Vertex>,
+    p0: Vec4,
+    p1: Vec4,
+    p2: Vec4,
+    p3: Vec4,
+    color: Vec4,
+    normal: Vec4,
+) {
     vertices.push(Vertex {
         position: p0,
         color,
+        normal,
     });
     vertices.push(Vertex {
         position: p1,
         color,
+        normal,
     });
     vertices.push(Vertex {
         position: p2,
         color,
+        normal,
     });
 
     vertices.push(Vertex {
         position: p2,
         color,
+        normal,
     });
     vertices.push(Vertex {
         position: p3,
         color,
+        normal,
     });
     vertices.push(Vertex {
         position: p0,
         color,
+        normal,
     });
 }
 
@@ -150,7 +164,15 @@ fn add_face_top(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z + 1.0, 1.0);
     let p2 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z, 1.0);
     let p3 = Vec4::new(pos.x, pos.y + 1.0, pos.z, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(0.0, 1.0, 0.0, 0.0),
+    );
 }
 
 fn add_face_bottom(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -158,7 +180,15 @@ fn add_face_bottom(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x + 1.0, pos.y, pos.z, 1.0);
     let p2 = Vec4::new(pos.x + 1.0, pos.y, pos.z + 1.0, 1.0);
     let p3 = Vec4::new(pos.x, pos.y, pos.z + 1.0, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(0.0, -1.0, 0.0, 0.0),
+    ); // -Y
 }
 
 fn add_face_right(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -166,7 +196,15 @@ fn add_face_right(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x + 1.0, pos.y, pos.z, 1.0);
     let p2 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z, 1.0);
     let p3 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z + 1.0, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(1.0, 0.0, 0.0, 0.0),
+    ); // +X
 }
 
 fn add_face_left(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -174,7 +212,16 @@ fn add_face_left(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x, pos.y, pos.z + 1.0, 1.0);
     let p2 = Vec4::new(pos.x, pos.y + 1.0, pos.z + 1.0, 1.0);
     let p3 = Vec4::new(pos.x, pos.y + 1.0, pos.z, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(-1.0, 0.0, 0.0, 0.0),
+    );
 }
 
 fn add_face_front(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -182,7 +229,15 @@ fn add_face_front(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x + 1.0, pos.y, pos.z + 1.0, 1.0);
     let p2 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z + 1.0, 1.0);
     let p3 = Vec4::new(pos.x, pos.y + 1.0, pos.z + 1.0, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(0.0, 0.0, 1.0, 0.0),
+    ); // +Z
 }
 
 fn add_face_back(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -190,5 +245,13 @@ fn add_face_back(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x, pos.y, pos.z, 1.0);
     let p2 = Vec4::new(pos.x, pos.y + 1.0, pos.z, 1.0);
     let p3 = Vec4::new(pos.x + 1.0, pos.y + 1.0, pos.z, 1.0);
-    push_quad(vertices, p0, p1, p2, p3, color);
+    push_quad(
+        vertices,
+        p0,
+        p1,
+        p2,
+        p3,
+        color,
+        Vec4::new(0.0, 0.0, -1.0, 0.0),
+    ); // -Z
 }

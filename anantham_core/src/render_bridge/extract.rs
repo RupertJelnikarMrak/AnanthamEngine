@@ -22,7 +22,10 @@ pub fn extract_camera_system(main_world: &mut World, render_world: &mut World) {
 
         let view_projection = vulkan_proj * view;
 
-        render_world.insert_resource(ExtractedView { view_projection });
+        render_world.insert_resource(ExtractedView {
+            view_projection,
+            camera_position: transform.translation,
+        });
     }
 }
 
