@@ -8,32 +8,50 @@ use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3, Vec4};
 use winit::keyboard::KeyCode;
 
-fn camera_movement_system(input: Res<Input>, mut query: Query<&mut Transform, With<Camera>>) {
-    let speed = 0.05;
+fn camera_movement_system(
+    mut input: ResMut<Input>,
+    mut query: Query<(&mut Transform, &mut Camera)>,
+) {
+    let move_speed = 0.05;
+    let look_speed = 0.001;
 
-    for mut transform in &mut query {
+    let mouse_delta = input.take_mouse_delta();
+
+    for (mut transform, mut camera) in &mut query {
+        camera.yaw -= mouse_delta.x * look_speed;
+        camera.pitch -= mouse_delta.y * look_speed;
+
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        transform.rotation = Quat::from_euler(glam::EulerRot::YXZ, camera.yaw, camera.pitch, 0.0);
+
         let mut velocity = Vec3::ZERO;
 
+        let forward = transform.rotation * -Vec3::Z;
+        let right = transform.rotation * Vec3::X;
+        let up = Vec3::Y;
+
         if input.pressed(KeyCode::KeyW) {
-            velocity.z -= speed;
+            velocity += forward;
         }
         if input.pressed(KeyCode::KeyS) {
-            velocity.z += speed;
+            velocity -= forward;
         }
         if input.pressed(KeyCode::KeyA) {
-            velocity.x -= speed;
+            velocity -= right;
         }
         if input.pressed(KeyCode::KeyD) {
-            velocity.x += speed;
+            velocity += right;
         }
         if input.pressed(KeyCode::Space) {
-            velocity.y += speed;
+            velocity += up;
         }
         if input.pressed(KeyCode::ShiftLeft) {
-            velocity.y -= speed;
+            velocity -= up;
         }
 
-        transform.translation += velocity;
+        if velocity.length_squared() > 0.0 {
+            transform.translation += velocity.normalize() * move_speed;
+        }
     }
 }
 
@@ -82,6 +100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fov: 1.57, // ~90 degrees
             near: 0.1,
             far: 1000.0,
+            pitch: 0.0,
+            yaw: 0.0,
         },
         Transform {
             translation: Vec3::new(16.5, 17.0, 18.0),

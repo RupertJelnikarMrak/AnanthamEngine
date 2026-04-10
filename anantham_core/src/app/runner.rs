@@ -2,6 +2,9 @@ use crate::input::Input;
 use crate::{ScreenResolution, app::App};
 use bevy_ecs::prelude::Resource;
 use std::sync::Arc;
+use winit::event::DeviceEvent;
+use winit::keyboard::KeyCode;
+use winit::window::CursorGrabMode;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, WindowEvent},
@@ -55,6 +58,19 @@ impl ApplicationHandler for EngineRunner {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && let Some(mut input) = self.app.main_world.get_resource_mut::<Input>()
+        {
+            input.add_mouse_delta(delta.0 as f32, delta.1 as f32);
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -67,6 +83,19 @@ impl ApplicationHandler for EngineRunner {
                 event_loop.exit();
             }
 
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                if let Some(window) = &self.window {
+                    let _ = window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
+                    window.set_cursor_visible(false);
+                }
+            }
+
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -76,6 +105,13 @@ impl ApplicationHandler for EngineRunner {
                     },
                 ..
             } => {
+                if keycode == KeyCode::Escape
+                    && state == ElementState::Pressed
+                    && let Some(window) = &self.window
+                {
+                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    window.set_cursor_visible(true);
+                }
                 if let Some(mut input) = self.app.main_world.get_resource_mut::<Input>() {
                     match state {
                         ElementState::Pressed => input.press(keycode),
