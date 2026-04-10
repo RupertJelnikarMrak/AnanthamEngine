@@ -33,7 +33,8 @@ pub fn extract_meshes_system(main_world: &mut World, render_world: &mut World) {
     for (transform, mesh) in query.iter(main_world) {
         extracted_meshes.push(ExtractedMesh {
             transform: transform.compute_matrix(),
-            vertices: mesh.vertices.clone(),
+            opaque_vertices: mesh.opaque_vertices.clone(),
+            transparent_vertices: mesh.transparent_vertices.clone(),
         });
     }
 

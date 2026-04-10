@@ -423,7 +423,14 @@ impl VulkanContext {
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA);
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD);
         let color_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
@@ -511,17 +518,30 @@ impl VulkanContext {
         let swapchain_ext = &self.swapchain_ext;
 
         let mut flattened_vertices: Vec<Vertex> = Vec::new();
-        let mut mesh_draw_commands = Vec::new();
+
+        let mut opaque_draw_commands = Vec::new();
+        let mut transparent_draw_commands = Vec::new();
 
         if let Some(meshes_res) = extracted_meshes {
             let mut current_offset = 0;
             for mesh in &meshes_res.meshes {
-                flattened_vertices.extend(&mesh.vertices);
+                if !mesh.opaque_vertices.is_empty() {
+                    flattened_vertices.extend(&mesh.opaque_vertices);
+                    let triangle_count = (mesh.opaque_vertices.len() / 3) as u32;
+                    opaque_draw_commands.push((mesh.transform, current_offset, triangle_count));
+                    current_offset += mesh.opaque_vertices.len() as u32;
+                }
 
-                let triangle_count = (mesh.vertices.len() / 3) as u32;
-                mesh_draw_commands.push((mesh.transform, current_offset, triangle_count));
-
-                current_offset += mesh.vertices.len() as u32;
+                if !mesh.transparent_vertices.is_empty() {
+                    flattened_vertices.extend(&mesh.transparent_vertices);
+                    let triangle_count = (mesh.transparent_vertices.len() / 3) as u32;
+                    transparent_draw_commands.push((
+                        mesh.transform,
+                        current_offset,
+                        triangle_count,
+                    ));
+                    current_offset += mesh.transparent_vertices.len() as u32;
+                }
             }
         }
 
@@ -670,19 +690,14 @@ impl VulkanContext {
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-            for (model_matrix, vertex_offset, triangle_count) in mesh_draw_commands {
-                if triangle_count == 0 {
-                    continue;
-                }
-
+            // 1. Draw Opaque First
+            for (model_matrix, vertex_offset, triangle_count) in opaque_draw_commands {
                 let push_constants = MeshPushConstants {
                     mvp: view_proj * model_matrix,
                     vertex_offset,
                     _padding: [0; 3],
                 };
-
                 let matrix_bytes = bytemuck::bytes_of(&push_constants);
-
                 device.cmd_push_constants(
                     self.command_buffer,
                     self.pipeline_layout,
@@ -690,7 +705,25 @@ impl VulkanContext {
                     0,
                     matrix_bytes,
                 );
+                self.mesh_ext
+                    .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
+            }
 
+            // 2. Draw Transparent Last
+            for (model_matrix, vertex_offset, triangle_count) in transparent_draw_commands {
+                let push_constants = MeshPushConstants {
+                    mvp: view_proj * model_matrix,
+                    vertex_offset,
+                    _padding: [0; 3],
+                };
+                let matrix_bytes = bytemuck::bytes_of(&push_constants);
+                device.cmd_push_constants(
+                    self.command_buffer,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::MESH_EXT,
+                    0,
+                    matrix_bytes,
+                );
                 self.mesh_ext
                     .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
             }

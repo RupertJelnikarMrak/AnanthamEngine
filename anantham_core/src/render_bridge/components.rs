@@ -10,7 +10,8 @@ pub struct Vertex {
 
 #[derive(Component, Clone)]
 pub struct Mesh {
-    pub vertices: Vec<Vertex>,
+    pub opaque_vertices: Vec<Vertex>,
+    pub transparent_vertices: Vec<Vertex>,
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -20,7 +21,8 @@ pub struct ExtractedView {
 
 pub struct ExtractedMesh {
     pub transform: Mat4,
-    pub vertices: Vec<Vertex>,
+    pub opaque_vertices: Vec<Vertex>,
+    pub transparent_vertices: Vec<Vertex>,
 }
 
 #[derive(Resource, Default)]

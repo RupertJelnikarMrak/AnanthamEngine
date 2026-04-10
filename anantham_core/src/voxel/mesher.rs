@@ -19,7 +19,8 @@ pub fn chunk_meshing_system(
     query: Query<(Entity, &Chunk), Added<Chunk>>,
 ) {
     for (entity, chunk) in query.iter() {
-        let mut vertices = Vec::new();
+        let mut opaque_vertices = Vec::new();
+        let mut transparent_vertices = Vec::new();
 
         for x in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
@@ -35,6 +36,12 @@ pub fn chunk_meshing_system(
                     let position = Vec3::new(x as f32, y as f32, z as f32);
                     let color = attributes.color;
 
+                    let target_vertices = if attributes.is_transparent {
+                        &mut transparent_vertices
+                    } else {
+                        &mut opaque_vertices
+                    };
+
                     // Top (+Y)
                     if y == CHUNK_SIZE - 1
                         || should_draw_face(
@@ -43,7 +50,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_top(&mut vertices, position, color);
+                        add_face_top(target_vertices, position, color);
                     }
                     // Bottom (-Y)
                     if y == 0
@@ -53,7 +60,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_bottom(&mut vertices, position, color);
+                        add_face_bottom(target_vertices, position, color);
                     }
                     // Right (+X)
                     if x == CHUNK_SIZE - 1
@@ -63,7 +70,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_right(&mut vertices, position, color);
+                        add_face_right(target_vertices, position, color);
                     }
                     // Left (-X)
                     if x == 0
@@ -73,7 +80,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_left(&mut vertices, position, color);
+                        add_face_left(target_vertices, position, color);
                     }
                     // Front (+Z)
                     if z == CHUNK_SIZE - 1
@@ -83,7 +90,7 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_front(&mut vertices, position, color);
+                        add_face_front(target_vertices, position, color);
                     }
                     // Back (-Z)
                     if z == 0
@@ -93,19 +100,20 @@ pub fn chunk_meshing_system(
                             &registry,
                         )
                     {
-                        add_face_back(&mut vertices, position, color);
+                        add_face_back(&mut opaque_vertices, position, color);
                     }
                 }
             }
         }
 
-        // Attach the newly generated mesh to the chunk entity
-        commands.entity(entity).insert(Mesh { vertices });
+        commands.entity(entity).insert(Mesh {
+            opaque_vertices,
+            transparent_vertices,
+        });
     }
 }
 
 // --- Face Generation Helpers ---
-
 /// Pushes two triangles (6 vertices) to form a quad.
 /// The winding order is 0 -> 1 -> 2 and 2 -> 3 -> 0.
 #[inline]
