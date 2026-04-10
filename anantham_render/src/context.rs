@@ -47,6 +47,10 @@ pub struct VulkanContext {
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     pub descriptor_set: vk::DescriptorSet,
+
+    pub depth_image: vk::Image,
+    pub depth_image_view: vk::ImageView,
+    pub depth_allocation: Option<gpu_allocator::vulkan::Allocation>,
 }
 
 #[repr(C)]
@@ -285,6 +289,55 @@ impl VulkanContext {
             )?
         };
 
+        // ## Depth Buffer ##
+        let depth_format = vk::Format::D32_SFLOAT;
+        let depth_image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(depth_format)
+            .extent(vk::Extent3D {
+                width: extent.width,   // <-- Using your 'extent' variable here
+                height: extent.height, // <-- Using your 'extent' variable here
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let depth_image = unsafe { device.create_image(&depth_image_info, None)? };
+
+        let depth_reqs = unsafe { device.get_image_memory_requirements(depth_image) };
+        let depth_allocation = allocator.allocate(&AllocationCreateDesc {
+            name: "Depth Buffer",
+            requirements: depth_reqs,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+
+        unsafe {
+            device.bind_image_memory(
+                depth_image,
+                depth_allocation.memory(),
+                depth_allocation.offset(),
+            )?;
+        }
+
+        let depth_view_info = vk::ImageViewCreateInfo::default()
+            .image(depth_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(depth_format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let depth_image_view = unsafe { device.create_image_view(&depth_view_info, None)? };
+
         // ## Descriptor Set Layout & Pool ##
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -359,8 +412,14 @@ impl VulkanContext {
         let rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::CLOCKWISE);
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+        let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
@@ -379,7 +438,8 @@ impl VulkanContext {
 
         let color_attachment_formats = [format.format];
         let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_attachment_formats);
+            .color_attachment_formats(&color_attachment_formats)
+            .depth_attachment_format(depth_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -387,6 +447,7 @@ impl VulkanContext {
             .rasterization_state(&rasterization_info)
             .multisample_state(&multisample_info)
             .color_blend_state(&color_blend_info)
+            .depth_stencil_state(&depth_stencil_info)
             .dynamic_state(&dynamic_state_info)
             .layout(pipeline_layout)
             .push_next(&mut pipeline_rendering_info);
@@ -435,6 +496,9 @@ impl VulkanContext {
             descriptor_pool,
             descriptor_set_layout,
             descriptor_set,
+            depth_image,
+            depth_image_view,
+            depth_allocation: Some(depth_allocation),
         })
     }
 
@@ -514,14 +578,31 @@ impl VulkanContext {
                     layer_count: 1,
                 });
 
+            let depth_image_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .image(self.depth_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    level_count: 1,
+                    layer_count: 1,
+                    ..Default::default()
+                });
+
             device.cmd_pipeline_barrier(
                 self.command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
-                std::slice::from_ref(&image_memory_barrier),
+                &[image_memory_barrier, depth_image_barrier],
             );
 
             let clear_value = vk::ClearValue {
@@ -536,13 +617,26 @@ impl VulkanContext {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(clear_value);
 
+            let depth_attachment_info = vk::RenderingAttachmentInfo::default()
+                .image_view(self.depth_image_view)
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                });
+
             let rendering_info = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.swapchain_extent,
                 })
                 .layer_count(1)
-                .color_attachments(std::slice::from_ref(&color_attachment_info));
+                .color_attachments(std::slice::from_ref(&color_attachment_info))
+                .depth_attachment(&depth_attachment_info);
 
             device.cmd_begin_rendering(self.command_buffer, &rendering_info);
             device.cmd_bind_pipeline(
@@ -654,6 +748,12 @@ impl Drop for VulkanContext {
             if let Some(alloc) = self.vertex_allocation.take() {
                 self.allocator.free(alloc).unwrap();
             }
+            if let Some(alloc) = self.depth_allocation.take() {
+                self.allocator.free(alloc).unwrap();
+            }
+            self.device.destroy_image_view(self.depth_image_view, None);
+            self.device.destroy_image(self.depth_image, None);
+
             self.device.destroy_buffer(self.vertex_buffer, None);
 
             std::mem::ManuallyDrop::drop(&mut self.allocator);
