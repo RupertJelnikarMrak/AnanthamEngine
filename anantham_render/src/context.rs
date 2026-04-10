@@ -1,4 +1,4 @@
-use anantham_core::render_bridge::components::ExtractedView;
+use anantham_core::render_bridge::components::{ExtractedMeshes, ExtractedView, Vertex};
 use ash::{Entry, Instance, ext::mesh_shader, vk};
 use bevy_ecs::prelude::Resource;
 use glam::Mat4;
@@ -47,6 +47,14 @@ pub struct VulkanContext {
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     pub descriptor_set: vk::DescriptorSet,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MeshPushConstants {
+    pub mvp: glam::Mat4,
+    pub vertex_offset: u32,
+    pub _padding: [u32; 3],
 }
 
 impl VulkanContext {
@@ -252,38 +260,17 @@ impl VulkanContext {
         .expect("Failed to create GPU allocator");
 
         // ## Vertex Data & Buffer ##
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct Vertex {
-            position: [f32; 4],
-            color: [f32; 4],
-        }
-
-        let vertices = [
-            Vertex {
-                position: [0.0, 0.5, 0.0, 1.0],
-                color: [1.0, 0.0, 0.0, 1.0],
-            },
-            Vertex {
-                position: [0.5, -0.5, 0.0, 1.0],
-                color: [0.0, 1.0, 0.0, 1.0],
-            },
-            Vertex {
-                position: [-0.5, -0.5, 0.0, 1.0],
-                color: [0.0, 0.0, 1.0, 1.0],
-            },
-        ];
-        let buffer_size = std::mem::size_of_val(&vertices) as u64;
+        let arena_size = 1024 * 1024;
 
         let buffer_info = vk::BufferCreateInfo::default()
-            .size(buffer_size)
+            .size(arena_size)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let vertex_buffer = unsafe { device.create_buffer(&buffer_info, None)? };
 
         let requirements = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
         let vertex_allocation = allocator.allocate(&AllocationCreateDesc {
-            name: "Triangle Vertex Buffer",
+            name: "Geometry Arena",
             requirements,
             location: MemoryLocation::CpuToGpu, // CPU accessible, GPU visible
             linear: true,
@@ -297,17 +284,6 @@ impl VulkanContext {
                 vertex_allocation.offset(),
             )?
         };
-
-        // Copy our Rust array into the mapped GPU memory
-        if let Some(mapped_ptr) = vertex_allocation.mapped_ptr() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    vertices.as_ptr() as *const u8,
-                    mapped_ptr.as_ptr() as *mut u8,
-                    buffer_size as usize,
-                );
-            }
-        }
 
         // ## Descriptor Set Layout & Pool ##
         let binding = vk::DescriptorSetLayoutBinding::default()
@@ -465,9 +441,43 @@ impl VulkanContext {
     pub fn draw_frame(
         &mut self,
         extracted_view: Option<&ExtractedView>,
+        extracted_meshes: Option<&ExtractedMeshes>,
     ) -> Result<(), Box<dyn Error>> {
         let device = &self.device;
         let swapchain_ext = &self.swapchain_ext;
+
+        let mut flattened_vertices: Vec<Vertex> = Vec::new();
+        let mut mesh_draw_commands = Vec::new();
+
+        if let Some(meshes_res) = extracted_meshes {
+            let mut current_offset = 0;
+            for mesh in &meshes_res.meshes {
+                flattened_vertices.extend(&mesh.vertices);
+
+                let triangle_count = (mesh.vertices.len() / 3) as u32;
+                mesh_draw_commands.push((mesh.transform, current_offset, triangle_count));
+
+                current_offset += mesh.vertices.len() as u32;
+            }
+        }
+
+        if !flattened_vertices.is_empty()
+            && let Some(alloc) = &self.vertex_allocation
+            && let Some(mapped_ptr) = alloc.mapped_ptr()
+        {
+            let upload_size = flattened_vertices.len() * std::mem::size_of::<Vertex>();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    flattened_vertices.as_ptr() as *const u8,
+                    mapped_ptr.as_ptr() as *mut u8,
+                    upload_size,
+                );
+            }
+        }
+
+        let view_proj = extracted_view
+            .map(|v| v.view_projection)
+            .unwrap_or(Mat4::IDENTITY);
 
         unsafe {
             device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
@@ -550,11 +560,6 @@ impl VulkanContext {
                 &[],
             );
 
-            let view_proj = extracted_view
-                .map(|v| v.view_projection)
-                .unwrap_or(Mat4::IDENTITY);
-            let matrix_bytes = bytemuck::bytes_of(&view_proj);
-
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -571,16 +576,30 @@ impl VulkanContext {
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline_layout,
-                vk::ShaderStageFlags::MESH_EXT,
-                0,
-                matrix_bytes,
-            );
+            for (model_matrix, vertex_offset, triangle_count) in mesh_draw_commands {
+                if triangle_count == 0 {
+                    continue;
+                }
 
-            self.mesh_ext
-                .cmd_draw_mesh_tasks(self.command_buffer, 1, 1, 1);
+                let push_constants = MeshPushConstants {
+                    mvp: view_proj * model_matrix,
+                    vertex_offset,
+                    _padding: [0; 3],
+                };
+
+                let matrix_bytes = bytemuck::bytes_of(&push_constants);
+
+                device.cmd_push_constants(
+                    self.command_buffer,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::MESH_EXT,
+                    0,
+                    matrix_bytes,
+                );
+
+                self.mesh_ext
+                    .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
+            }
 
             device.cmd_end_rendering(self.command_buffer);
 

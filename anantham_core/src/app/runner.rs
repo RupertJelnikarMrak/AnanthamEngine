@@ -1,5 +1,5 @@
-use crate::app::App;
 use crate::input::Input;
+use crate::{ScreenResolution, app::App};
 use bevy_ecs::prelude::Resource;
 use std::sync::Arc;
 use winit::{
@@ -40,7 +40,12 @@ impl ApplicationHandler for EngineRunner {
 
             let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
-            // Insert the window into the Render World so the Vulkan plugin can find it
+            let physical_size = window.inner_size();
+            self.app.main_world.insert_resource(ScreenResolution {
+                width: physical_size.width,
+                height: physical_size.height,
+            });
+
             self.app
                 .render_world
                 .insert_resource(AppWindow(window.clone()));
@@ -61,6 +66,7 @@ impl ApplicationHandler for EngineRunner {
                 tracing::info!("Shutting down engine...");
                 event_loop.exit();
             }
+
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -77,6 +83,14 @@ impl ApplicationHandler for EngineRunner {
                     }
                 }
             }
+
+            WindowEvent::Resized(physical_size) => {
+                if let Some(mut res) = self.app.main_world.get_resource_mut::<ScreenResolution>() {
+                    res.width = physical_size.width;
+                    res.height = physical_size.height;
+                }
+            }
+
             WindowEvent::RedrawRequested => {
                 // Execute the full game and render loop
                 self.app.update();

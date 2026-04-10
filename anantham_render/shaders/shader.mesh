@@ -4,28 +4,32 @@
 layout(local_size_x = 3, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = 3, max_primitives = 1) out;
 
-// The struct mirroring our Rust data
 struct Vertex {
     vec4 position;
     vec4 color;
 };
 
-// The SSBO bound from Rust
 layout(std430, set = 0, binding = 0) readonly buffer VertexBuffer {
     Vertex vertices[];
 };
 
-layout(location = 0) out vec4 outColor[];
-
 layout(push_constant) uniform PushConstants {
-    mat4 view_projection;
+    mat4 mvp;
+    uint vertex_offset;
+    uint pad0, pad1, pad2;
 } pc;
+
+layout(location = 0) out vec4 outColor[];
 
 void main() {
     uint iid = gl_LocalInvocationID.x;
+    uint gid = gl_WorkGroupID.x;
 
-    gl_MeshVerticesEXT[iid].gl_Position = pc.view_projection * vertices[iid].position;
-    outColor[iid] = vertices[iid].color;
+    uint absolute_index = pc.vertex_offset + (gid * 3) + iid;
+    Vertex v = vertices[absolute_index];
+
+    gl_MeshVerticesEXT[iid].gl_Position = pc.mvp * v.position;
+    outColor[iid] = v.color;
 
     if (iid == 0) {
         gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);

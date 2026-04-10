@@ -1,6 +1,9 @@
 pub mod context;
 
-use anantham_core::{App, AppWindow, Plugin, render_bridge::components::ExtractedView};
+use anantham_core::{
+    App, AppWindow, Plugin,
+    render_bridge::components::{ExtractedMeshes, ExtractedView},
+};
 use bevy_ecs::prelude::*;
 use context::VulkanContext;
 
@@ -33,10 +36,11 @@ fn initialize_vulkan_system(
 fn draw_frame_system(
     vulkan_context: Option<ResMut<VulkanContext>>,
     extracted_view: Option<Res<ExtractedView>>,
+    extracted_meshes: Option<Res<ExtractedMeshes>>,
 ) {
     if let Some(mut context) = vulkan_context {
         context
-            .draw_frame(extracted_view.as_deref())
+            .draw_frame(extracted_view.as_deref(), extracted_meshes.as_deref())
             .expect("Failed to draw frame");
     }
 }
