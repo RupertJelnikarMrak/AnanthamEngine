@@ -62,6 +62,29 @@ pub struct MeshPushConstants {
     pub _padding: [u32; 3],
 }
 
+struct SwapchainSetup {
+    ext: ash::khr::swapchain::Device,
+    swapchain: vk::SwapchainKHR,
+    images: Vec<vk::Image>,
+    image_views: Vec<vk::ImageView>,
+    format: vk::Format,
+    extent: vk::Extent2D,
+}
+
+struct SyncSetup {
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    image_available: vk::Semaphore,
+    render_finished: vk::Semaphore,
+    in_flight: vk::Fence,
+}
+
+struct FrameGeometry {
+    vertices: Vec<Vertex>,
+    opaque_draws: Vec<(Mat4, u32, u32)>,
+    transparent_draws: Vec<(Mat4, u32, u32)>,
+}
+
 // ============================================================================
 // INITIALIZATION HELPERS
 // ============================================================================
@@ -78,14 +101,7 @@ impl VulkanContext {
         let (device, graphics_queue, mesh_ext) =
             Self::create_logical_device(&instance, physical_device, graphics_queue_family_index)?;
 
-        let (
-            swapchain_ext,
-            swapchain,
-            swapchain_images,
-            swapchain_image_views,
-            swapchain_format,
-            swapchain_extent,
-        ) = Self::create_swapchain(
+        let swap_setup = Self::create_swapchain(
             window,
             &instance,
             &device,
@@ -94,13 +110,7 @@ impl VulkanContext {
             &surface_ext,
         )?;
 
-        let (
-            command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
-        ) = Self::create_commands_and_sync(&device, graphics_queue_family_index)?;
+        let sync_setup = Self::create_commands_and_sync(&device, graphics_queue_family_index)?;
 
         let mut allocator =
             Self::create_allocator(instance.clone(), device.clone(), physical_device)?;
@@ -110,7 +120,7 @@ impl VulkanContext {
 
         let depth_format = vk::Format::D32_SFLOAT;
         let (depth_image, depth_image_view, depth_allocation) =
-            Self::create_depth_buffer(&device, &mut allocator, swapchain_extent, depth_format)?;
+            Self::create_depth_buffer(&device, &mut allocator, swap_setup.extent, depth_format)?;
 
         let (descriptor_pool, descriptor_set_layout, descriptor_set) =
             Self::create_descriptors(&device, vertex_buffer)?;
@@ -118,7 +128,7 @@ impl VulkanContext {
         let (pipeline_layout, graphics_pipeline, transparent_pipeline) = Self::create_pipelines(
             &device,
             descriptor_set_layout,
-            swapchain_format,
+            swap_setup.format,
             depth_format,
         )?;
 
@@ -134,17 +144,17 @@ impl VulkanContext {
             graphics_queue,
             graphics_queue_family_index,
             mesh_ext,
-            swapchain_ext,
-            swapchain,
-            swapchain_images,
-            swapchain_image_views,
-            swapchain_format,
-            swapchain_extent,
-            command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
+            swapchain_ext: swap_setup.ext,
+            swapchain: swap_setup.swapchain,
+            swapchain_images: swap_setup.images,
+            swapchain_image_views: swap_setup.image_views,
+            swapchain_format: swap_setup.format,
+            swapchain_extent: swap_setup.extent,
+            command_pool: sync_setup.command_pool,
+            command_buffer: sync_setup.command_buffer,
+            image_available_semaphore: sync_setup.image_available,
+            render_finished_semaphore: sync_setup.render_finished,
+            in_flight_fence: sync_setup.in_flight,
             pipeline_layout,
             graphics_pipeline,
             transparent_pipeline,
@@ -288,17 +298,7 @@ impl VulkanContext {
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
         surface_ext: &ash::khr::surface::Instance,
-    ) -> Result<
-        (
-            ash::khr::swapchain::Device,
-            vk::SwapchainKHR,
-            Vec<vk::Image>,
-            Vec<vk::ImageView>,
-            vk::Format,
-            vk::Extent2D,
-        ),
-        Box<dyn Error>,
-    > {
+    ) -> Result<SwapchainSetup, Box<dyn Error>> {
         let capabilities = unsafe {
             surface_ext.get_physical_device_surface_capabilities(physical_device, surface)?
         };
@@ -365,29 +365,20 @@ impl VulkanContext {
             })
             .collect();
 
-        Ok((
-            swapchain_ext,
+        Ok(SwapchainSetup {
+            ext: swapchain_ext,
             swapchain,
-            swapchain_images,
-            swapchain_image_views,
-            format.format,
+            images: swapchain_images,
+            image_views: swapchain_image_views,
+            format: format.format,
             extent,
-        ))
+        })
     }
 
     fn create_commands_and_sync(
         device: &ash::Device,
         queue_family_index: u32,
-    ) -> Result<
-        (
-            vk::CommandPool,
-            vk::CommandBuffer,
-            vk::Semaphore,
-            vk::Semaphore,
-            vk::Fence,
-        ),
-        Box<dyn Error>,
-    > {
+    ) -> Result<SyncSetup, Box<dyn Error>> {
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -405,13 +396,13 @@ impl VulkanContext {
         let render_finished_semaphore = unsafe { device.create_semaphore(&sempahore_info, None)? };
         let in_flight_fence = unsafe { device.create_fence(&fence_info, None)? };
 
-        Ok((
+        Ok(SyncSetup {
             command_pool,
             command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
-        ))
+            image_available: image_available_semaphore,
+            render_finished: render_finished_semaphore,
+            in_flight: in_flight_fence,
+        })
     }
 
     fn create_allocator(
@@ -727,17 +718,16 @@ impl VulkanContext {
         extracted_meshes: Option<&ExtractedMeshes>,
     ) -> Result<(), Box<dyn Error>> {
         // 1. Prepare Data
-        let (flattened_vertices, opaque_draw_commands, transparent_draw_commands) =
-            Self::prepare_geometry(extracted_view, extracted_meshes);
+        let geometry_setup = Self::prepare_geometry(extracted_view, extracted_meshes);
 
         // 2. Upload Buffer
-        self.upload_geometry(&flattened_vertices);
+        self.upload_geometry(&geometry_setup.vertices);
 
         // 3. Record & Submit Command Buffer
         self.record_and_submit_commands(
             extracted_view,
-            opaque_draw_commands,
-            transparent_draw_commands,
+            geometry_setup.opaque_draws,
+            geometry_setup.transparent_draws,
         )?;
 
         Ok(())
@@ -746,7 +736,7 @@ impl VulkanContext {
     fn prepare_geometry(
         extracted_view: Option<&ExtractedView>,
         extracted_meshes: Option<&ExtractedMeshes>,
-    ) -> (Vec<Vertex>, Vec<(Mat4, u32, u32)>, Vec<(Mat4, u32, u32)>) {
+    ) -> FrameGeometry {
         let mut flattened_vertices = Vec::new();
         let mut opaque_draw_commands = Vec::new();
         let mut transparent_draw_commands = Vec::new();
@@ -803,26 +793,26 @@ impl VulkanContext {
                 }
             }
         }
-        (
-            flattened_vertices,
-            opaque_draw_commands,
-            transparent_draw_commands,
-        )
+        FrameGeometry {
+            vertices: flattened_vertices,
+            opaque_draws: opaque_draw_commands,
+            transparent_draws: transparent_draw_commands,
+        }
     }
 
     fn upload_geometry(&self, flattened_vertices: &[Vertex]) {
-        if !flattened_vertices.is_empty() {
-            if let Some(alloc) = &self.vertex_allocation {
-                if let Some(mapped_ptr) = alloc.mapped_ptr() {
-                    let upload_size = flattened_vertices.len() * std::mem::size_of::<Vertex>();
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            flattened_vertices.as_ptr() as *const u8,
-                            mapped_ptr.as_ptr() as *mut u8,
-                            upload_size,
-                        );
-                    }
-                }
+        if flattened_vertices.is_empty() {
+            return;
+        }
+
+        if let Some(mapped_ptr) = self.vertex_allocation.as_ref().and_then(|a| a.mapped_ptr()) {
+            let upload_size = std::mem::size_of_val(flattened_vertices); // <-- Clippy's preferred way
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    flattened_vertices.as_ptr() as *const u8,
+                    mapped_ptr.as_ptr() as *mut u8,
+                    upload_size,
+                );
             }
         }
     }
