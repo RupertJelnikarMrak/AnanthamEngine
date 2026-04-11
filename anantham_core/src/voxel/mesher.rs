@@ -1,35 +1,95 @@
 use crate::render_bridge::components::{Mesh, Vertex};
-use crate::voxel::chunk::{CHUNK_SIZE, Chunk};
+use crate::voxel::ChunkManager;
+use crate::voxel::chunk::{CHUNK_SIZE, Chunk, ChunkCoord, Remesh};
 use crate::voxel::registry::BlockRegistry;
 use bevy_ecs::prelude::*;
 use glam::{Vec3, Vec4};
 
-#[inline]
-fn should_draw_face(voxel_id: u16, neighbor_id: u16, registry: &BlockRegistry) -> bool {
-    if voxel_id == neighbor_id {
-        return false;
-    }
-
-    registry.get(neighbor_id).is_transparent
-}
-
 pub fn chunk_meshing_system(
     mut commands: Commands,
     registry: Res<BlockRegistry>,
-    query: Query<(Entity, &Chunk), Added<Chunk>>,
+    chunk_manager: Res<ChunkManager>,
+    chunk_query: Query<&Chunk>, // Used to look up neighbor data
+    remesh_query: Query<(Entity, &ChunkCoord), With<Remesh>>,
 ) {
-    for (entity, chunk) in query.iter() {
+    for (entity, coord) in remesh_query.iter() {
+        let Ok(chunk) = chunk_query.get(entity) else {
+            continue;
+        };
+
         let mut opaque_vertices = Vec::new();
         let mut transparent_vertices = Vec::new();
+
+        // Cross-Chunk visibility helper
+        let is_face_visible = |voxel_id: u16, nx: i32, ny: i32, nz: i32| -> bool {
+            let neighbor_id = if nx >= 0
+                && nx < CHUNK_SIZE as i32
+                && ny >= 0
+                && ny < CHUNK_SIZE as i32
+                && nz >= 0
+                && nz < CHUNK_SIZE as i32
+            {
+                // Inside the current chunk
+                chunk.voxels[Chunk::index(nx as usize, ny as usize, nz as usize)]
+            } else {
+                // Across the chunk border! Calculate which neighbor to ask.
+                let mut n_coord = coord.0;
+                let mut lx = nx;
+                let mut ly = ny;
+                let mut lz = nz;
+
+                if nx < 0 {
+                    n_coord.x -= 1;
+                    lx += CHUNK_SIZE as i32;
+                } else if nx >= CHUNK_SIZE as i32 {
+                    n_coord.x += 1;
+                    lx -= CHUNK_SIZE as i32;
+                }
+
+                if ny < 0 {
+                    n_coord.y -= 1;
+                    ly += CHUNK_SIZE as i32;
+                } else if ny >= CHUNK_SIZE as i32 {
+                    n_coord.y += 1;
+                    ly -= CHUNK_SIZE as i32;
+                }
+
+                if nz < 0 {
+                    n_coord.z -= 1;
+                    lz += CHUNK_SIZE as i32;
+                } else if nz >= CHUNK_SIZE as i32 {
+                    n_coord.z += 1;
+                    lz -= CHUNK_SIZE as i32;
+                }
+
+                // Ask the ChunkManager if the neighbor exists
+                if let Some(&n_entity) = chunk_manager.active_chunks.get(&n_coord) {
+                    if let Ok(n_chunk) = chunk_query.get(n_entity) {
+                        n_chunk.voxels[Chunk::index(lx as usize, ly as usize, lz as usize)]
+                    } else {
+                        0 // Entity exists but chunk not loaded
+                    }
+                } else {
+                    0 // Chunk is entirely unloaded, treat the void as air so we see the edge of the world
+                }
+            };
+
+            // If the blocks are identical (e.g., Glass touching Glass), hide the internal wall
+            if voxel_id == neighbor_id {
+                return false;
+            }
+
+            // Otherwise, draw the wall if the neighbor is transparent (Air or Glass)
+            registry.get(neighbor_id).is_transparent
+        };
 
         for x in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 for z in 0..CHUNK_SIZE {
                     let voxel_id = chunk.voxels[Chunk::index(x, y, z)];
 
-                    // Skip Air
                     if voxel_id == 0 {
-                        continue;
+                        continue; // Skip Air
                     }
 
                     let attributes = registry.get(voxel_id);
@@ -42,64 +102,27 @@ pub fn chunk_meshing_system(
                         &mut opaque_vertices
                     };
 
-                    // Top (+Y)
-                    if y == CHUNK_SIZE - 1
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x, y + 1, z)],
-                            &registry,
-                        )
-                    {
+                    let ix = x as i32;
+                    let iy = y as i32;
+                    let iz = z as i32;
+
+                    // The logic is now beautifully unified! No more hardcoded CHUNK_SIZE edge checks.
+                    if is_face_visible(voxel_id, ix, iy + 1, iz) {
                         add_face_top(target_vertices, position, color);
                     }
-                    // Bottom (-Y)
-                    if y == 0
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x, y - 1, z)],
-                            &registry,
-                        )
-                    {
+                    if is_face_visible(voxel_id, ix, iy - 1, iz) {
                         add_face_bottom(target_vertices, position, color);
                     }
-                    // Right (+X)
-                    if x == CHUNK_SIZE - 1
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x + 1, y, z)],
-                            &registry,
-                        )
-                    {
+                    if is_face_visible(voxel_id, ix + 1, iy, iz) {
                         add_face_right(target_vertices, position, color);
                     }
-                    // Left (-X)
-                    if x == 0
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x - 1, y, z)],
-                            &registry,
-                        )
-                    {
+                    if is_face_visible(voxel_id, ix - 1, iy, iz) {
                         add_face_left(target_vertices, position, color);
                     }
-                    // Front (+Z)
-                    if z == CHUNK_SIZE - 1
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x, y, z + 1)],
-                            &registry,
-                        )
-                    {
+                    if is_face_visible(voxel_id, ix, iy, iz + 1) {
                         add_face_front(target_vertices, position, color);
                     }
-                    // Back (-Z)
-                    if z == 0
-                        || should_draw_face(
-                            voxel_id,
-                            chunk.voxels[Chunk::index(x, y, z - 1)],
-                            &registry,
-                        )
-                    {
+                    if is_face_visible(voxel_id, ix, iy, iz - 1) {
                         add_face_back(target_vertices, position, color);
                     }
                 }

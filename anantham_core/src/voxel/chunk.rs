@@ -5,7 +5,10 @@ pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
 #[derive(Component, Clone, Copy, PartialEq, Hash)]
-pub struct ChunkCood(pub IVec3);
+pub struct ChunkCoord(pub IVec3);
+
+#[derive(Component)]
+pub struct Remesh;
 
 #[derive(Component)]
 pub struct Chunk {
@@ -15,5 +18,11 @@ pub struct Chunk {
 impl Chunk {
     pub fn index(x: usize, y: usize, z: usize) -> usize {
         x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            voxels: vec![0; CHUNK_VOLUME].into_boxed_slice().try_into().unwrap(),
+        }
     }
 }

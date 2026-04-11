@@ -10,3 +10,4 @@ anantham_render = { workspace = true }
 glam = { workspace = true }
 bevy_ecs = { workspace = true }
 winit = { workspace = true }
+noise = { workspace = true }

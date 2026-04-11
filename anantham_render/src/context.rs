@@ -339,7 +339,7 @@ impl VulkanContext {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(vk::PresentModeKHR::IMMEDIATE)
             .clipped(true)
             .old_swapchain(vk::SwapchainKHR::null());
 
@@ -425,9 +425,9 @@ impl VulkanContext {
         device: &ash::Device,
         allocator: &mut Allocator,
     ) -> Result<(vk::Buffer, Allocation), Box<dyn Error>> {
-        let arena_size = 1024 * 1024;
+        let arena_size = 256 * 1024 * 1024;
         let buffer_info = vk::BufferCreateInfo::default()
-            .size(arena_size)
+            .size(arena_size as u64)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let vertex_buffer = unsafe { device.create_buffer(&buffer_info, None)? };
@@ -805,8 +805,17 @@ impl VulkanContext {
             return;
         }
 
-        if let Some(mapped_ptr) = self.vertex_allocation.as_ref().and_then(|a| a.mapped_ptr()) {
-            let upload_size = std::mem::size_of_val(flattened_vertices); // <-- Clippy's preferred way
+        if let Some(alloc) = &self.vertex_allocation
+            && let Some(mapped_ptr) = self.vertex_allocation.as_ref().and_then(|a| a.mapped_ptr())
+        {
+            let upload_size = std::mem::size_of_val(flattened_vertices);
+
+            assert!(
+                upload_size <= alloc.size() as usize,
+                "FATAL: Vertex geometry ({upload_size} bytes) exceeded Vulkan buffer size ({} bytes)!",
+                alloc.size()
+            );
+
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     flattened_vertices.as_ptr() as *const u8,
