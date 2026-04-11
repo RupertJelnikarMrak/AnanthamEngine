@@ -1,5 +1,5 @@
+use crate::app::{App, ScreenResolution};
 use crate::input::Input;
-use crate::{ScreenResolution, app::App};
 use bevy_ecs::prelude::Resource;
 use std::sync::Arc;
 use winit::event::DeviceEvent;

@@ -10,3 +10,6 @@ winit = { workspace = true }
 tracing-subscriber = { workspace = true }
 glam.workspace = true
 bytemuck = { workspace = true }
+bevy_app = { workspace = true }
+bevy_tasks = { workspace = true }
+futures-lite = { workspace = true }

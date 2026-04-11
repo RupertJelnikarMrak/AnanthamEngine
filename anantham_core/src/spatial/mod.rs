@@ -1,24 +1,24 @@
-use bevy_ecs::prelude::Component;
-use glam::{Mat4, Quat, Vec3};
+pub mod camera;
+pub mod transform;
 
-#[derive(Component, Clone, Copy)]
-pub struct Transform {
-    pub translation: Vec3,
-    pub rotation: Quat,
-    pub scale: Vec3,
-}
+use crate::prelude::*;
+use camera::Camera;
+use transform::Transform;
 
-impl Transform {
-    pub fn compute_matrix(&self) -> Mat4 {
-        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+pub struct SpatialDomainPlugin;
+
+impl Plugin for SpatialDomainPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_initial_camera);
     }
 }
 
-#[derive(Component)]
-pub struct Camera {
-    pub fov: f32,
-    pub near: f32,
-    pub far: f32,
-    pub yaw: f32,
-    pub pitch: f32,
+fn spawn_initial_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera::default(),
+        Transform {
+            translation: glam::Vec3::new(16.0, 40.0, 16.0),
+            ..Default::default()
+        },
+    ));
 }

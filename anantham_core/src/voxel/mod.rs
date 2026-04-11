@@ -2,11 +2,18 @@ pub mod chunk;
 pub mod mesher;
 pub mod registry;
 
-use bevy_ecs::prelude::{Entity, Resource};
-use glam::IVec3;
-use std::collections::HashMap;
+use crate::prelude::*;
 
-#[derive(Resource, Default)]
-pub struct ChunkManager {
-    pub active_chunks: HashMap<IVec3, Entity>,
+pub struct VoxelDomainPlugin;
+
+impl Plugin for VoxelDomainPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<registry::BlockRegistry>();
+        app.init_resource::<chunk::ChunkManager>();
+
+        app.add_systems(
+            Update,
+            (mesher::spawn_meshing_tasks, mesher::poll_meshing_tasks),
+        );
+    }
 }

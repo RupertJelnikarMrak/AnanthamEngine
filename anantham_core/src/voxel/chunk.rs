@@ -1,28 +1,36 @@
-use bevy_ecs::prelude::Component;
+use crate::prelude::*;
+use crate::render_bridge::components::Vertex;
 use glam::IVec3;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
-#[derive(Component, Clone, Copy, PartialEq, Hash)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkCoord(pub IVec3);
 
-#[derive(Component)]
-pub struct Remesh;
-
-#[derive(Component)]
-pub struct Chunk {
-    pub voxels: Box<[u16; CHUNK_VOLUME]>,
+#[derive(Resource, Default)]
+pub struct ChunkManager {
+    pub active_chunks: HashMap<ChunkCoord, Entity>,
 }
 
-impl Chunk {
-    pub fn index(x: usize, y: usize, z: usize) -> usize {
-        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
-    }
+#[derive(Component, Clone)]
+pub struct VoxelData(pub Arc<[u16; CHUNK_VOLUME]>);
 
+impl VoxelData {
     pub fn empty() -> Self {
-        Self {
-            voxels: vec![0; CHUNK_VOLUME].into_boxed_slice().try_into().unwrap(),
-        }
+        Self(Arc::new([0; CHUNK_VOLUME]))
     }
+}
+
+#[derive(Component)]
+pub struct NeedsMeshing;
+
+#[derive(Component)]
+pub struct MeshingTask(pub Task<MeshedChunkData>);
+
+pub struct MeshedChunkData {
+    pub opaque_vertices: Vec<Vertex>,
+    pub transparent_vertices: Vec<Vertex>,
 }

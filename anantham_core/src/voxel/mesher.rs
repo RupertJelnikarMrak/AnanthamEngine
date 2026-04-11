@@ -1,144 +1,190 @@
-use crate::render_bridge::components::{Mesh, Vertex};
-use crate::voxel::ChunkManager;
-use crate::voxel::chunk::{CHUNK_SIZE, Chunk, ChunkCoord, Remesh};
-use crate::voxel::registry::BlockRegistry;
-use bevy_ecs::prelude::*;
+use crate::prelude::*;
+use crate::render_bridge::components::{ChunkMesh, Vertex};
+use crate::voxel::chunk::{
+    CHUNK_SIZE, ChunkCoord, ChunkManager, MeshedChunkData, MeshingTask, NeedsMeshing, VoxelData,
+};
+use crate::voxel::registry::{BlockAttributes, BlockRegistry};
+use bevy_tasks::AsyncComputeTaskPool;
+use futures_lite::future;
 use glam::{Vec3, Vec4};
+use std::sync::Arc;
 
-pub fn chunk_meshing_system(
+#[inline]
+fn voxel_index(x: usize, y: usize, z: usize) -> usize {
+    x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+}
+
+pub fn spawn_meshing_tasks(
     mut commands: Commands,
     registry: Res<BlockRegistry>,
     chunk_manager: Res<ChunkManager>,
-    chunk_query: Query<&Chunk>, // Used to look up neighbor data
-    remesh_query: Query<(Entity, &ChunkCoord), With<Remesh>>,
+    chunk_query: Query<&VoxelData>,
+    remesh_query: Query<(Entity, &ChunkCoord), With<NeedsMeshing>>,
 ) {
+    let thread_pool = AsyncComputeTaskPool::get();
+
+    let attributes_arc = registry.attributes.clone();
+
     for (entity, coord) in remesh_query.iter() {
-        let Ok(chunk) = chunk_query.get(entity) else {
+        let Ok(voxel_data) = chunk_query.get(entity) else {
             continue;
         };
 
-        let mut opaque_vertices = Vec::new();
-        let mut transparent_vertices = Vec::new();
+        let get_neighbor = |dx: i32,
+                            dy: i32,
+                            dz: i32|
+         -> Option<Arc<[u16; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>> {
+            let mut n_coord = coord.0;
+            n_coord.x += dx;
+            n_coord.y += dy;
+            n_coord.z += dz;
 
-        // Cross-Chunk visibility helper
-        let is_face_visible = |voxel_id: u16, nx: i32, ny: i32, nz: i32| -> bool {
-            let neighbor_id = if nx >= 0
-                && nx < CHUNK_SIZE as i32
-                && ny >= 0
-                && ny < CHUNK_SIZE as i32
-                && nz >= 0
-                && nz < CHUNK_SIZE as i32
+            if let Some(&n_entity) = chunk_manager.active_chunks.get(&ChunkCoord(n_coord))
+                && let Ok(n_data) = chunk_query.get(n_entity)
             {
-                // Inside the current chunk
-                chunk.voxels[Chunk::index(nx as usize, ny as usize, nz as usize)]
-            } else {
-                // Across the chunk border! Calculate which neighbor to ask.
-                let mut n_coord = coord.0;
-                let mut lx = nx;
-                let mut ly = ny;
-                let mut lz = nz;
-
-                if nx < 0 {
-                    n_coord.x -= 1;
-                    lx += CHUNK_SIZE as i32;
-                } else if nx >= CHUNK_SIZE as i32 {
-                    n_coord.x += 1;
-                    lx -= CHUNK_SIZE as i32;
-                }
-
-                if ny < 0 {
-                    n_coord.y -= 1;
-                    ly += CHUNK_SIZE as i32;
-                } else if ny >= CHUNK_SIZE as i32 {
-                    n_coord.y += 1;
-                    ly -= CHUNK_SIZE as i32;
-                }
-
-                if nz < 0 {
-                    n_coord.z -= 1;
-                    lz += CHUNK_SIZE as i32;
-                } else if nz >= CHUNK_SIZE as i32 {
-                    n_coord.z += 1;
-                    lz -= CHUNK_SIZE as i32;
-                }
-
-                // Ask the ChunkManager if the neighbor exists
-                if let Some(&n_entity) = chunk_manager.active_chunks.get(&n_coord) {
-                    if let Ok(n_chunk) = chunk_query.get(n_entity) {
-                        n_chunk.voxels[Chunk::index(lx as usize, ly as usize, lz as usize)]
-                    } else {
-                        0 // Entity exists but chunk not loaded
-                    }
-                } else {
-                    0 // Chunk is entirely unloaded, treat the void as air so we see the edge of the world
-                }
-            };
-
-            // If the blocks are identical (e.g., Glass touching Glass), hide the internal wall
-            if voxel_id == neighbor_id {
-                return false;
+                return Some(n_data.0.clone());
             }
 
-            // Otherwise, draw the wall if the neighbor is transparent (Air or Glass)
-            registry.get(neighbor_id).is_transparent
+            None
         };
 
-        for x in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_SIZE {
-                for z in 0..CHUNK_SIZE {
-                    let voxel_id = chunk.voxels[Chunk::index(x, y, z)];
+        let neighbors = [
+            get_neighbor(1, 0, 0),
+            get_neighbor(-1, 0, 0),
+            get_neighbor(0, 1, 0),
+            get_neighbor(0, -1, 0),
+            get_neighbor(0, 0, 1),
+            get_neighbor(0, 0, -1),
+        ];
 
-                    if voxel_id == 0 {
-                        continue; // Skip Air
-                    }
+        let voxels_clone = voxel_data.0.clone();
+        let attrs_clone = attributes_arc.clone();
 
-                    let attributes = registry.get(voxel_id);
-                    let position = Vec3::new(x as f32, y as f32, z as f32);
-                    let color = attributes.color;
-
-                    let target_vertices = if attributes.is_transparent {
-                        &mut transparent_vertices
-                    } else {
-                        &mut opaque_vertices
-                    };
-
-                    let ix = x as i32;
-                    let iy = y as i32;
-                    let iz = z as i32;
-
-                    // The logic is now beautifully unified! No more hardcoded CHUNK_SIZE edge checks.
-                    if is_face_visible(voxel_id, ix, iy + 1, iz) {
-                        add_face_top(target_vertices, position, color);
-                    }
-                    if is_face_visible(voxel_id, ix, iy - 1, iz) {
-                        add_face_bottom(target_vertices, position, color);
-                    }
-                    if is_face_visible(voxel_id, ix + 1, iy, iz) {
-                        add_face_right(target_vertices, position, color);
-                    }
-                    if is_face_visible(voxel_id, ix - 1, iy, iz) {
-                        add_face_left(target_vertices, position, color);
-                    }
-                    if is_face_visible(voxel_id, ix, iy, iz + 1) {
-                        add_face_front(target_vertices, position, color);
-                    }
-                    if is_face_visible(voxel_id, ix, iy, iz - 1) {
-                        add_face_back(target_vertices, position, color);
-                    }
-                }
+        let task = thread_pool.spawn(async move {
+            let (opaque, transparent) =
+                mesh_chunk_internal(&voxels_clone, &neighbors, &attrs_clone);
+            MeshedChunkData {
+                opaque_vertices: opaque,
+                transparent_vertices: transparent,
             }
-        }
-
-        commands.entity(entity).insert(Mesh {
-            opaque_vertices,
-            transparent_vertices,
         });
+
+        commands
+            .entity(entity)
+            .remove::<NeedsMeshing>()
+            .insert(MeshingTask(task));
     }
 }
 
-// --- Face Generation Helpers ---
-/// Pushes two triangles (6 vertices) to form a quad.
-/// The winding order is 0 -> 1 -> 2 and 2 -> 3 -> 0.
+pub fn poll_meshing_tasks(mut commands: Commands, mut query: Query<(Entity, &mut MeshingTask)>) {
+    for (entity, mut task) in &mut query {
+        if let Some(meshed_data) = future::block_on(future::poll_once(&mut task.0)) {
+            commands
+                .entity(entity)
+                .remove::<MeshingTask>()
+                .insert(ChunkMesh {
+                    opaque_vertices: meshed_data.opaque_vertices,
+                    transparent_vertices: meshed_data.transparent_vertices,
+                });
+        }
+    }
+}
+
+fn mesh_chunk_internal(
+    voxels: &[u16; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE],
+    neighbors: &[Option<Arc<[u16; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>>; 6],
+    attributes: &[BlockAttributes], // Directly accepts the slice from the Arc
+) -> (Vec<Vertex>, Vec<Vertex>) {
+    let mut opaque_vertices = Vec::new();
+    let mut transparent_vertices = Vec::new();
+
+    let is_face_visible = |voxel_id: u16, nx: i32, ny: i32, nz: i32| -> bool {
+        let neighbor_id = if nx >= 0
+            && nx < CHUNK_SIZE as i32
+            && ny >= 0
+            && ny < CHUNK_SIZE as i32
+            && nz >= 0
+            && nz < CHUNK_SIZE as i32
+        {
+            voxels[voxel_index(nx as usize, ny as usize, nz as usize)]
+        } else {
+            let (n_idx, lx, ly, lz) = if nx < 0 {
+                (1, nx + CHUNK_SIZE as i32, ny, nz)
+            } else if nx >= CHUNK_SIZE as i32 {
+                (0, nx - CHUNK_SIZE as i32, ny, nz)
+            } else if ny < 0 {
+                (3, nx, ny + CHUNK_SIZE as i32, nz)
+            } else if ny >= CHUNK_SIZE as i32 {
+                (2, nx, ny - CHUNK_SIZE as i32, nz)
+            } else if nz < 0 {
+                (5, nx, ny, nz + CHUNK_SIZE as i32)
+            } else {
+                (4, nx, ny, nz - CHUNK_SIZE as i32)
+            };
+
+            if let Some(n_voxels) = &neighbors[n_idx] {
+                n_voxels[voxel_index(lx as usize, ly as usize, lz as usize)]
+            } else {
+                0
+            }
+        };
+
+        if voxel_id == neighbor_id {
+            return false;
+        }
+
+        attributes
+            .get(neighbor_id as usize)
+            .unwrap_or(&attributes[0])
+            .is_transparent
+    };
+
+    for x in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let voxel_id = voxels[voxel_index(x, y, z)];
+                if voxel_id == 0 {
+                    continue;
+                }
+
+                let attrs = attributes.get(voxel_id as usize).unwrap_or(&attributes[0]);
+                let position = Vec3::new(x as f32, y as f32, z as f32);
+                let color = attrs.color;
+
+                let target_vertices = if attrs.is_transparent {
+                    &mut transparent_vertices
+                } else {
+                    &mut opaque_vertices
+                };
+
+                let ix = x as i32;
+                let iy = y as i32;
+                let iz = z as i32;
+
+                if is_face_visible(voxel_id, ix, iy + 1, iz) {
+                    add_face_top(target_vertices, position, color);
+                }
+                if is_face_visible(voxel_id, ix, iy - 1, iz) {
+                    add_face_bottom(target_vertices, position, color);
+                }
+                if is_face_visible(voxel_id, ix + 1, iy, iz) {
+                    add_face_right(target_vertices, position, color);
+                }
+                if is_face_visible(voxel_id, ix - 1, iy, iz) {
+                    add_face_left(target_vertices, position, color);
+                }
+                if is_face_visible(voxel_id, ix, iy, iz + 1) {
+                    add_face_front(target_vertices, position, color);
+                }
+                if is_face_visible(voxel_id, ix, iy, iz - 1) {
+                    add_face_back(target_vertices, position, color);
+                }
+            }
+        }
+    }
+    (opaque_vertices, transparent_vertices)
+}
+
 #[inline]
 fn push_quad(
     vertices: &mut Vec<Vertex>,
@@ -164,7 +210,6 @@ fn push_quad(
         color,
         normal,
     });
-
     vertices.push(Vertex {
         position: p2,
         color,
@@ -211,7 +256,7 @@ fn add_face_bottom(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
         p3,
         color,
         Vec4::new(0.0, -1.0, 0.0, 0.0),
-    ); // -Y
+    );
 }
 
 fn add_face_right(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -227,7 +272,7 @@ fn add_face_right(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
         p3,
         color,
         Vec4::new(1.0, 0.0, 0.0, 0.0),
-    ); // +X
+    );
 }
 
 fn add_face_left(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -235,7 +280,6 @@ fn add_face_left(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
     let p1 = Vec4::new(pos.x, pos.y, pos.z + 1.0, 1.0);
     let p2 = Vec4::new(pos.x, pos.y + 1.0, pos.z + 1.0, 1.0);
     let p3 = Vec4::new(pos.x, pos.y + 1.0, pos.z, 1.0);
-
     push_quad(
         vertices,
         p0,
@@ -260,7 +304,7 @@ fn add_face_front(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
         p3,
         color,
         Vec4::new(0.0, 0.0, 1.0, 0.0),
-    ); // +Z
+    );
 }
 
 fn add_face_back(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
@@ -276,5 +320,5 @@ fn add_face_back(vertices: &mut Vec<Vertex>, pos: Vec3, color: Vec4) {
         p3,
         color,
         Vec4::new(0.0, 0.0, -1.0, 0.0),
-    ); // -Z
+    );
 }
