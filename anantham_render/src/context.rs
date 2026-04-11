@@ -51,7 +51,7 @@ pub struct VulkanContext {
 
     pub depth_image: vk::Image,
     pub depth_image_view: vk::ImageView,
-    pub depth_allocation: Option<gpu_allocator::vulkan::Allocation>,
+    pub depth_allocation: Option<Allocation>,
 }
 
 #[repr(C)]
@@ -62,10 +62,108 @@ pub struct MeshPushConstants {
     pub _padding: [u32; 3],
 }
 
+// ============================================================================
+// INITIALIZATION HELPERS
+// ============================================================================
 impl VulkanContext {
     pub fn new(window: &Window) -> Result<Self, Box<dyn Error>> {
         tracing::debug!("Starting Vulkan boot sequence...");
+
         let entry = unsafe { Entry::load()? };
+        let (instance, surface_ext, surface) = Self::create_instance_and_surface(&entry, window)?;
+
+        let (physical_device, graphics_queue_family_index) =
+            Self::pick_physical_device(&instance, &surface_ext, surface)?;
+
+        let (device, graphics_queue, mesh_ext) =
+            Self::create_logical_device(&instance, physical_device, graphics_queue_family_index)?;
+
+        let (
+            swapchain_ext,
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            swapchain_format,
+            swapchain_extent,
+        ) = Self::create_swapchain(
+            window,
+            &instance,
+            &device,
+            physical_device,
+            surface,
+            &surface_ext,
+        )?;
+
+        let (
+            command_pool,
+            command_buffer,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
+        ) = Self::create_commands_and_sync(&device, graphics_queue_family_index)?;
+
+        let mut allocator =
+            Self::create_allocator(instance.clone(), device.clone(), physical_device)?;
+
+        let (vertex_buffer, vertex_allocation) =
+            Self::create_vertex_buffer(&device, &mut allocator)?;
+
+        let depth_format = vk::Format::D32_SFLOAT;
+        let (depth_image, depth_image_view, depth_allocation) =
+            Self::create_depth_buffer(&device, &mut allocator, swapchain_extent, depth_format)?;
+
+        let (descriptor_pool, descriptor_set_layout, descriptor_set) =
+            Self::create_descriptors(&device, vertex_buffer)?;
+
+        let (pipeline_layout, graphics_pipeline, transparent_pipeline) = Self::create_pipelines(
+            &device,
+            descriptor_set_layout,
+            swapchain_format,
+            depth_format,
+        )?;
+
+        tracing::info!("Vulkan Context fully initialized");
+
+        Ok(Self {
+            entry,
+            instance,
+            surface_ext,
+            surface,
+            physical_device,
+            device,
+            graphics_queue,
+            graphics_queue_family_index,
+            mesh_ext,
+            swapchain_ext,
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            swapchain_format,
+            swapchain_extent,
+            command_pool,
+            command_buffer,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
+            pipeline_layout,
+            graphics_pipeline,
+            transparent_pipeline,
+            allocator: std::mem::ManuallyDrop::new(allocator),
+            vertex_buffer,
+            vertex_allocation: Some(vertex_allocation),
+            descriptor_pool,
+            descriptor_set_layout,
+            descriptor_set,
+            depth_image,
+            depth_image_view,
+            depth_allocation: Some(depth_allocation),
+        })
+    }
+
+    fn create_instance_and_surface(
+        entry: &Entry,
+        window: &Window,
+    ) -> Result<(Instance, ash::khr::surface::Instance, vk::SurfaceKHR), Box<dyn Error>> {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
         let required_extensions = ash_window::enumerate_required_extensions(display_handle)?;
@@ -77,12 +175,20 @@ impl VulkanContext {
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
         let surface = unsafe {
-            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)?
+            ash_window::create_surface(entry, &instance, display_handle, window_handle, None)?
         };
-        let surface_ext = ash::khr::surface::Instance::new(&entry, &instance);
+        let surface_ext = ash::khr::surface::Instance::new(entry, &instance);
 
+        Ok((instance, surface_ext, surface))
+    }
+
+    fn pick_physical_device(
+        instance: &Instance,
+        surface_ext: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+    ) -> Result<(vk::PhysicalDevice, u32), Box<dyn Error>> {
         let pdevices = unsafe { instance.enumerate_physical_devices()? };
-        let (physical_device, graphics_queue_family_index) = pdevices
+        let (physical_device, queue_family_index) = pdevices
             .into_iter()
             .filter_map(|pdevice| {
                 let properties = unsafe { instance.get_physical_device_properties(pdevice) };
@@ -105,7 +211,6 @@ impl VulkanContext {
                     return None;
                 }
 
-                // Find a queue family that supports both graphics and presenting to our surface
                 let queue_families =
                     unsafe { instance.get_physical_device_queue_family_properties(pdevice) };
                 let queue_index = queue_families.iter().enumerate().position(|(i, info)| {
@@ -118,16 +223,13 @@ impl VulkanContext {
                     supports_graphics && supports_surface
                 });
 
-                // Score the device so Discrete GPUs are heavily preferred over Integrated
                 if let Some(index) = queue_index {
                     let mut score = 0;
-
                     if device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
                         score += 1000;
                     } else if device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
                         score += 100;
                     }
-
                     Some((score, pdevice, index as u32))
                 } else {
                     None
@@ -141,9 +243,17 @@ impl VulkanContext {
         let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
         tracing::info!("Selected Physical Device: {:?}", device_name);
 
+        Ok((physical_device, queue_family_index))
+    }
+
+    fn create_logical_device(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        queue_family_index: u32,
+    ) -> Result<(ash::Device, vk::Queue, mesh_shader::Device), Box<dyn Error>> {
         let queue_priorities = [1.0];
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics_queue_family_index)
+            .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities);
 
         let device_extensions = [
@@ -165,10 +275,30 @@ impl VulkanContext {
             .push_next(&mut features2);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
-        let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family_index, 0) };
-        let mesh_ext = mesh_shader::Device::new(&instance, &device);
+        let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let mesh_ext = mesh_shader::Device::new(instance, &device);
 
-        // ## Swapchain ##
+        Ok((device, graphics_queue, mesh_ext))
+    }
+
+    fn create_swapchain(
+        window: &Window,
+        instance: &Instance,
+        device: &ash::Device,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
+        surface_ext: &ash::khr::surface::Instance,
+    ) -> Result<
+        (
+            ash::khr::swapchain::Device,
+            vk::SwapchainKHR,
+            Vec<vk::Image>,
+            Vec<vk::ImageView>,
+            vk::Format,
+            vk::Extent2D,
+        ),
+        Box<dyn Error>,
+    > {
         let capabilities = unsafe {
             surface_ext.get_physical_device_surface_capabilities(physical_device, surface)?
         };
@@ -213,10 +343,9 @@ impl VulkanContext {
             .clipped(true)
             .old_swapchain(vk::SwapchainKHR::null());
 
-        let swapchain_ext = ash::khr::swapchain::Device::new(&instance, &device);
+        let swapchain_ext = ash::khr::swapchain::Device::new(instance, device);
         let swapchain = unsafe { swapchain_ext.create_swapchain(&create_info, None)? };
         let swapchain_images = unsafe { swapchain_ext.get_swapchain_images(swapchain)? };
-        tracing::debug!("Swapchain Created with {} images.", swapchain_images.len());
 
         let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
             .iter()
@@ -236,11 +365,34 @@ impl VulkanContext {
             })
             .collect();
 
-        // ## Commands and Sync ##
+        Ok((
+            swapchain_ext,
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            format.format,
+            extent,
+        ))
+    }
+
+    fn create_commands_and_sync(
+        device: &ash::Device,
+        queue_family_index: u32,
+    ) -> Result<
+        (
+            vk::CommandPool,
+            vk::CommandBuffer,
+            vk::Semaphore,
+            vk::Semaphore,
+            vk::Fence,
+        ),
+        Box<dyn Error>,
+    > {
         let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(graphics_queue_family_index)
+            .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_info, None)? };
+
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -253,20 +405,36 @@ impl VulkanContext {
         let render_finished_semaphore = unsafe { device.create_semaphore(&sempahore_info, None)? };
         let in_flight_fence = unsafe { device.create_fence(&fence_info, None)? };
 
-        // ## Memory Allocator ##
-        let mut allocator = Allocator::new(&AllocatorCreateDesc {
-            instance: instance.clone(),
-            device: device.clone(),
+        Ok((
+            command_pool,
+            command_buffer,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
+        ))
+    }
+
+    fn create_allocator(
+        instance: Instance,
+        device: ash::Device,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<Allocator, Box<dyn Error>> {
+        let allocator = Allocator::new(&AllocatorCreateDesc {
+            instance,
+            device,
             physical_device,
             debug_settings: Default::default(),
             buffer_device_address: false,
             allocation_sizes: Default::default(),
-        })
-        .expect("Failed to create GPU allocator");
+        })?;
+        Ok(allocator)
+    }
 
-        // ## Vertex Data & Buffer ##
+    fn create_vertex_buffer(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+    ) -> Result<(vk::Buffer, Allocation), Box<dyn Error>> {
         let arena_size = 1024 * 1024;
-
         let buffer_info = vk::BufferCreateInfo::default()
             .size(arena_size)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
@@ -277,7 +445,7 @@ impl VulkanContext {
         let vertex_allocation = allocator.allocate(&AllocationCreateDesc {
             name: "Geometry Arena",
             requirements,
-            location: MemoryLocation::CpuToGpu, // CPU accessible, GPU visible
+            location: MemoryLocation::CpuToGpu,
             linear: true,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })?;
@@ -290,14 +458,21 @@ impl VulkanContext {
             )?
         };
 
-        // ## Depth Buffer ##
-        let depth_format = vk::Format::D32_SFLOAT;
+        Ok((vertex_buffer, vertex_allocation))
+    }
+
+    fn create_depth_buffer(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        extent: vk::Extent2D,
+        depth_format: vk::Format,
+    ) -> Result<(vk::Image, vk::ImageView, Allocation), Box<dyn Error>> {
         let depth_image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(depth_format)
             .extent(vk::Extent3D {
-                width: extent.width,   // <-- Using your 'extent' variable here
-                height: extent.height, // <-- Using your 'extent' variable here
+                width: extent.width,
+                height: extent.height,
                 depth: 1,
             })
             .mip_levels(1)
@@ -308,7 +483,6 @@ impl VulkanContext {
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let depth_image = unsafe { device.create_image(&depth_image_info, None)? };
-
         let depth_reqs = unsafe { device.get_image_memory_requirements(depth_image) };
         let depth_allocation = allocator.allocate(&AllocationCreateDesc {
             name: "Depth Buffer",
@@ -339,7 +513,20 @@ impl VulkanContext {
             });
         let depth_image_view = unsafe { device.create_image_view(&depth_view_info, None)? };
 
-        // ## Descriptor Set Layout & Pool ##
+        Ok((depth_image, depth_image_view, depth_allocation))
+    }
+
+    fn create_descriptors(
+        device: &ash::Device,
+        vertex_buffer: vk::Buffer,
+    ) -> Result<
+        (
+            vk::DescriptorPool,
+            vk::DescriptorSetLayout,
+            vk::DescriptorSet,
+        ),
+        Box<dyn Error>,
+    > {
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -354,13 +541,11 @@ impl VulkanContext {
         let pool_size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1);
-
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(std::slice::from_ref(&pool_size))
             .max_sets(1);
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
 
-        // ## Allocate & Update Descriptor Set ##
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(std::slice::from_ref(&descriptor_set_layout));
@@ -379,9 +564,15 @@ impl VulkanContext {
 
         unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
 
-        tracing::debug!("Vertex Buffer allocated and Descriptor Set created.");
+        Ok((descriptor_pool, descriptor_set_layout, descriptor_set))
+    }
 
-        // ## Pipeline ##
+    fn create_pipelines(
+        device: &ash::Device,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::Pipeline), Box<dyn Error>> {
         let mesh_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/shader.mesh.spv"));
         let mesh_code = ash::util::read_spv(&mut std::io::Cursor::new(&mesh_bytes[..]))?;
         let mesh_info = vk::ShaderModuleCreateInfo::default().code(&mesh_code);
@@ -404,55 +595,53 @@ impl VulkanContext {
                 .name(entry_name),
         ];
 
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::MESH_EXT)
+            .offset(0)
+            .size(std::mem::size_of::<MeshPushConstants>() as u32);
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
+
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let viewport_state_info = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
-        let rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        let push_contant_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::MESH_EXT)
-            .offset(0)
-            .size(std::mem::size_of::<glam::Mat4>() as u32);
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
-            .push_constant_ranges(std::slice::from_ref(&push_contant_range));
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
-
-        let color_attachment_formats = [format.format];
+        let color_attachment_formats = [color_format];
         let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_attachment_formats)
             .depth_attachment_format(depth_format);
 
-        // ==========================================
-        // 1. OPAQUE PIPELINE (Stone/Dirt)
-        // ==========================================
+        // --- OPAQUE PIPELINE ---
         let opaque_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false); // MUST BE FALSE
-
+            .blend_enable(false);
         let opaque_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&opaque_blend_attachment));
 
         let opaque_depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
-            .depth_write_enable(true) // MUST BE TRUE
+            .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
+        let opaque_rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+
         let opaque_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .viewport_state(&viewport_state_info)
-            .rasterization_state(&rasterization_info) // Uses BACK culling
+            .rasterization_state(&opaque_rasterization_info)
             .multisample_state(&multisample_info)
             .color_blend_state(&opaque_blend_info)
             .depth_stencil_state(&opaque_depth_stencil_info)
@@ -466,40 +655,35 @@ impl VulkanContext {
                 .unwrap()[0]
         };
 
-        // ==========================================
-        // 2. TRANSPARENT PIPELINE (Glass/Water)
-        // ==========================================
+        // --- TRANSPARENT PIPELINE ---
         let transparent_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(true) // MUST BE TRUE
+            .blend_enable(true)
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::ONE)
             .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
             .alpha_blend_op(vk::BlendOp::ADD);
-
         let transparent_blend_info = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&transparent_blend_attachment));
 
         let transparent_depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
-            .depth_write_enable(false) // MUST BE FALSE
+            .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        // Render targets must be recreated because push_next mutates pointers
-        let mut transparent_rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_attachment_formats)
-            .depth_attachment_format(depth_format);
-
-        // Glass needs NO culling so you can see the inside volume
         let transparent_rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE) // Disable culling!
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+
+        let mut transparent_rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_attachment_formats)
+            .depth_attachment_format(depth_format);
 
         let transparent_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -522,67 +706,55 @@ impl VulkanContext {
                 .unwrap()[0]
         };
 
-        tracing::info!("Mesh Shader Pipelines compiled successfully.");
-
         unsafe {
             device.destroy_shader_module(mesh_module, None);
             device.destroy_shader_module(frag_module, None);
         }
 
-        tracing::info!("Vulkan Context fully initialized");
+        tracing::info!("Mesh Shader Pipelines compiled successfully.");
 
-        Ok(Self {
-            entry,
-            instance,
-            surface_ext,
-            surface,
-            physical_device,
-            device,
-            graphics_queue,
-            graphics_queue_family_index,
-            mesh_ext,
-            swapchain_ext,
-            swapchain,
-            swapchain_images,
-            swapchain_image_views,
-            swapchain_format: format.format,
-            swapchain_extent: extent,
-            command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
-            pipeline_layout,
-            graphics_pipeline,
-            transparent_pipeline,
-            allocator: std::mem::ManuallyDrop::new(allocator),
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
-            descriptor_pool,
-            descriptor_set_layout,
-            descriptor_set,
-            depth_image,
-            depth_image_view,
-            depth_allocation: Some(depth_allocation),
-        })
+        Ok((pipeline_layout, graphics_pipeline, transparent_pipeline))
     }
+}
 
+// ============================================================================
+// RUNTIME RENDER LOOP
+// ============================================================================
+impl VulkanContext {
     pub fn draw_frame(
         &mut self,
         extracted_view: Option<&ExtractedView>,
         extracted_meshes: Option<&ExtractedMeshes>,
     ) -> Result<(), Box<dyn Error>> {
-        let device = &self.device;
-        let swapchain_ext = &self.swapchain_ext;
+        // 1. Prepare Data
+        let (flattened_vertices, opaque_draw_commands, transparent_draw_commands) =
+            Self::prepare_geometry(extracted_view, extracted_meshes);
 
-        let mut flattened_vertices: Vec<Vertex> = Vec::new();
+        // 2. Upload Buffer
+        self.upload_geometry(&flattened_vertices);
 
+        // 3. Record & Submit Command Buffer
+        self.record_and_submit_commands(
+            extracted_view,
+            opaque_draw_commands,
+            transparent_draw_commands,
+        )?;
+
+        Ok(())
+    }
+
+    fn prepare_geometry(
+        extracted_view: Option<&ExtractedView>,
+        extracted_meshes: Option<&ExtractedMeshes>,
+    ) -> (Vec<Vertex>, Vec<(Mat4, u32, u32)>, Vec<(Mat4, u32, u32)>) {
+        let mut flattened_vertices = Vec::new();
         let mut opaque_draw_commands = Vec::new();
         let mut transparent_draw_commands = Vec::new();
 
         if let Some(meshes_res) = extracted_meshes {
             let mut current_offset = 0;
             for mesh in &meshes_res.meshes {
+                // Pack Opaque
                 if !mesh.opaque_vertices.is_empty() {
                     flattened_vertices.extend(&mesh.opaque_vertices);
                     let triangle_count = (mesh.opaque_vertices.len() / 3) as u32;
@@ -590,6 +762,7 @@ impl VulkanContext {
                     current_offset += mesh.opaque_vertices.len() as u32;
                 }
 
+                // Pack Transparent (With Camera-Depth Sorting)
                 if !mesh.transparent_vertices.is_empty() {
                     let cam_pos_world = extracted_view
                         .map(|v| v.camera_position)
@@ -630,20 +803,38 @@ impl VulkanContext {
                 }
             }
         }
+        (
+            flattened_vertices,
+            opaque_draw_commands,
+            transparent_draw_commands,
+        )
+    }
 
-        if !flattened_vertices.is_empty()
-            && let Some(alloc) = &self.vertex_allocation
-            && let Some(mapped_ptr) = alloc.mapped_ptr()
-        {
-            let upload_size = flattened_vertices.len() * std::mem::size_of::<Vertex>();
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    flattened_vertices.as_ptr() as *const u8,
-                    mapped_ptr.as_ptr() as *mut u8,
-                    upload_size,
-                );
+    fn upload_geometry(&self, flattened_vertices: &[Vertex]) {
+        if !flattened_vertices.is_empty() {
+            if let Some(alloc) = &self.vertex_allocation {
+                if let Some(mapped_ptr) = alloc.mapped_ptr() {
+                    let upload_size = flattened_vertices.len() * std::mem::size_of::<Vertex>();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            flattened_vertices.as_ptr() as *const u8,
+                            mapped_ptr.as_ptr() as *mut u8,
+                            upload_size,
+                        );
+                    }
+                }
             }
         }
+    }
+
+    fn record_and_submit_commands(
+        &mut self,
+        extracted_view: Option<&ExtractedView>,
+        opaque_draw_commands: Vec<(Mat4, u32, u32)>,
+        transparent_draw_commands: Vec<(Mat4, u32, u32)>,
+    ) -> Result<(), Box<dyn Error>> {
+        let device = &self.device;
+        let swapchain_ext = &self.swapchain_ext;
 
         let view_proj = extracted_view
             .map(|v| v.view_projection)
@@ -744,7 +935,6 @@ impl VulkanContext {
                 .color_attachments(std::slice::from_ref(&color_attachment_info))
                 .depth_attachment(&depth_attachment_info);
 
-            // ## BEGIN RENDER ## //
             device.cmd_begin_rendering(self.command_buffer, &rendering_info);
 
             device.cmd_bind_descriptor_sets(
@@ -772,7 +962,7 @@ impl VulkanContext {
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-            // Bind opaque pipeline and draw opaque first
+            // Draw Opaque First
             device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -796,7 +986,7 @@ impl VulkanContext {
                     .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
             }
 
-            // Bind transparent_pipeline and draw transparent last
+            // Draw Transparent Last
             device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -820,7 +1010,6 @@ impl VulkanContext {
                     .cmd_draw_mesh_tasks(self.command_buffer, triangle_count, 1, 1);
             }
 
-            // ## END RENDER ## //
             device.cmd_end_rendering(self.command_buffer);
 
             image_memory_barrier.src_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
@@ -866,6 +1055,9 @@ impl VulkanContext {
     }
 }
 
+// ============================================================================
+// CLEANUP
+// ============================================================================
 impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
@@ -890,6 +1082,8 @@ impl Drop for VulkanContext {
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
             self.device.destroy_pipeline(self.graphics_pipeline, None);
+            self.device
+                .destroy_pipeline(self.transparent_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
 

@@ -8,10 +8,10 @@ layout(location = 0) out vec4 outColor;
 void main() {
     vec3 normal = normalize(inNormal);
 
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+    vec3 lightDir = normalize(vec3(0.4, 1.0, 0.8));
     float diff = dot(normal, lightDir);
 
-    if (inColor.a < 1.0) {
+    if (inColor.a < 0.99) {
         diff = abs(diff);
     } else {
         diff = max(diff, 0.0);
