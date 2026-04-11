@@ -4,7 +4,7 @@ use bevy_ecs::prelude::Resource;
 use std::sync::Arc;
 use winit::event::DeviceEvent;
 use winit::keyboard::KeyCode;
-use winit::window::CursorGrabMode;
+use winit::window::{CursorGrabMode, Fullscreen};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, WindowEvent},
@@ -39,6 +39,7 @@ impl ApplicationHandler for EngineRunner {
         if self.window.is_none() {
             let attributes = Window::default_attributes()
                 .with_title("Anantham Engine")
+                .with_fullscreen(Some(Fullscreen::Borderless(None)))
                 .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
 
             let window = Arc::new(event_loop.create_window(attributes).unwrap());
@@ -111,6 +112,16 @@ impl ApplicationHandler for EngineRunner {
                 {
                     let _ = window.set_cursor_grab(CursorGrabMode::None);
                     window.set_cursor_visible(true);
+                }
+                if keycode == KeyCode::F11
+                    && state == ElementState::Pressed
+                    && let Some(window) = &self.window
+                {
+                    if window.fullscreen().is_some() {
+                        window.set_fullscreen(None);
+                    } else {
+                        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    }
                 }
                 if let Some(mut input) = self.app.main_world.get_resource_mut::<Input>() {
                     match state {
