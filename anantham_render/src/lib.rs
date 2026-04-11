@@ -1,10 +1,12 @@
 pub mod context;
+pub mod core;
+pub mod pipeline;
+pub mod resource;
 
 use anantham_core::{
     App, AppWindow, Plugin,
     render_bridge::components::{ExtractedMeshes, ExtractedView},
 };
-use bevy_ecs::prelude::*;
 use context::VulkanContext;
 
 pub struct VoxelRenderPlugin;
