@@ -7,10 +7,21 @@
   provides unbreakable systemic primitives, a distinct visual identity, and
   establishes the culture, while delegating infinite mechanic expansion to a
   heavily integrated modding ecosystem.
-- **Visual Identity:** A macro-micro voxel system. The base building unit is a
-  1-meter grid to maintain structural identity and accessibility (low floor),
-  but blocks can be sub-divided into micro-voxel grids (e.g., 16^3 or 32^3) for
-  high-fidelity carving and scripting (infinite ceiling).
+- **Visual Identity:** Curated creative constraints over decision paralysis. The
+  base building unit is a strict **1-meter voxel grid** to maintain structural
+  identity, accessibility, and extreme rendering performance.
+- **The Illusion of Micro:** Instead of a globally tracked micro-voxel
+  architecture (which wastes memory), depth and detail are achieved through
+  visual illusions and specific abstractions:
+    - _Hardware Tessellation & Edge Parallax:_ Flat faces remain optimized
+      quads, while block edges are dynamically tessellated on the GPU to give
+      true 3D depth to textures.
+    - _Native Sub-Shapes:_ The 1m grid natively supports complex states (slabs,
+      stairs, quarter-blocks) resolved dynamically by the mesher.
+    - _Artisan Handcrafting:_ Players can design intricate, sub-divided items
+      (e.g., custom furniture, weapons) in a dedicated workbench interface. The
+      engine bakes these designs into highly optimized, static standalone ECS
+      Entities, keeping the core terrain data perfectly clean.
 - **Scale and Immersion:** Massive render distances with continuous horizons.
   High ambition utilizing modern hardware over legacy low-spec compatibility.
 
@@ -19,8 +30,8 @@
 - **Language:** Rust.
 - **The Core Pattern (App & Plugins):** A strict separation between the
   Immutable Core and Official/Community Plugins.
-    - **Main World:** Owns gameplay state, the ECS database (Bevy/hecs style),
-      the Wasm runtime state, and macro-grids. Runs on a fixed deterministic
+    - **Main World:** Owns gameplay state, the ECS database (Bevy-style), the
+      Wasm runtime state, and the 1m voxel grid. Runs on a fixed deterministic
       timestep.
     - **Extraction Phase:** A brief, synchronous bridge. The Main World securely
       copies data (transforms, grid diffs, animation states) to the Render
@@ -28,10 +39,14 @@
     - **Render World:** Strictly owns the Vulkan 1.4 `ash::Device`, GPU
       allocators, Swapchain, and SSBOs. Variables cannot be accidentally mutated
       by game logic.
-- **Rendering Pipeline:** - No discrete LODs. Utilizes hardware tessellation,
-  mesh shaders, and continuous edge-aware decimation.
-    - Sparse Voxel Octrees (SVO) and Greedy Meshing for micro-voxels.
-    - Voxel Global Illumination (VXGI) and Virtual Shadow Maps (VSM).
+- **Rendering Pipeline:** Utilizes Vulkan Mesh Shaders and continuous edge-aware
+  decimation.
+    - **Dual-Pipeline Meshing:** A sophisticated greedy mesher that handles
+      opaque cross-chunk culling and mathematically perfect order-dependent
+      transparent rendering (e.g., glass, water).
+    - **Baked Ambient Occlusion:** Zero-cost smooth lighting baked directly into
+      the vertex data during chunk generation.
+    - **Voxel Global Illumination (VXGI) & Virtual Shadow Maps (VSM).**
     - **The Render Graph:** The renderer is locked in the core to preserve
       visual identity, but exposes an Extensible Render Graph. Native mods
       cannot overwrite the renderer via hacky injections; they inject strictly
@@ -111,15 +126,18 @@ It relies entirely on the API exposed to the community.
 - **Goal:** A 5-minute technical demo to secure funding and community/creator
   buy-in via a closed Mod Jam.
 - **Focus:** Establish the Wasm boundary, the Render World/Main World extraction
-  phase, and the base Voxel/VXGI pipeline.
+  phase, and the seamless generation of the 1m voxel grid.
 - **Sequence:**
-    1. _Wasm Command Queue:_ Implement the `hecs` boundary and test live-loaded
-       `.wasm` logic injection.
-    2. _Macro:_ Procedural heightmap rendering massive distant horizons via the
-       Vulkan 1.4 Render Graph.
-    3. _Transition:_ Fly down to the surface, demonstrating continuous LOD.
-    4. _Micro:_ Player chisels a 1-meter stone block into a micro-voxel lantern
-       housing.
-    5. _Logic/Lighting:_ Player places a glowing crystal inside. The crystal's
-       behavior is driven by the Wasm Command Queue, casting dynamic VXGI light
-       inside the carved geometry.
+    1. _Wasm Command Queue:_ Implement the `bevy_ecs` boundary and test
+       live-loaded `.wasm` logic injection.
+    2. _Macro Grid:_ Procedural generation of a massive rolling horizon using
+       Perlin noise, seamlessly loading and unloading chunks in a background
+       thread.
+    3. _Transition:_ Fly down to the surface, demonstrating native resolution
+       rendering and hardware tessellation/parallax on block edges.
+    4. _The Artisan System:_ Player opens the crafting interface, designs a
+       high-detail custom lantern using a temporary micro-grid, and the engine
+       bakes it into a highly optimized Mesh Entity.
+    5. _Logic/Lighting:_ Player places the newly crafted Entity in the world.
+       The lantern's glow is driven by the Wasm Command Queue, casting dynamic
+       VXGI light against the terrain.
