@@ -35,3 +35,13 @@ impl Camera {
         proj
     }
 }
+
+pub fn spawn_initial_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera::default(),
+        Transform {
+            translation: glam::Vec3::new(16.0, 40.0, 16.0),
+            ..Default::default()
+        },
+    ));
+}

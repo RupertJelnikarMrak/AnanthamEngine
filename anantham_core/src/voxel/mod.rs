@@ -2,7 +2,12 @@ pub mod chunk;
 pub mod mesher;
 pub mod registry;
 
-use crate::prelude::*;
+pub mod prelude {
+    pub use super::chunk::*;
+    pub use super::registry::*;
+}
+
+use crate::plugin_prelude::*;
 
 pub struct VoxelDomainPlugin;
 

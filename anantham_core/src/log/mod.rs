@@ -1,4 +1,4 @@
-use crate::app::{App, Plugin};
+use crate::plugin_prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
 pub struct LogPlugin;

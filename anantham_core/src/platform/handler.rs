@@ -1,74 +1,27 @@
-use crate::app::{App, ScreenResolution};
-use crate::input::Input;
-use bevy_ecs::prelude::Resource;
+use crate::platform::window::{AppWindow, ScreenResolution};
+use crate::prelude::*;
+use crate::render_bridge::{ExtractSchedule, RenderSchedule};
 use std::sync::Arc;
-use winit::event::DeviceEvent;
-use winit::keyboard::KeyCode;
-use winit::window::{CursorGrabMode, Fullscreen};
-use winit::{
-    application::ApplicationHandler,
-    event::{ElementState, KeyEvent, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::PhysicalKey,
-    window::{Window, WindowId},
-};
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-#[derive(Resource, Clone)]
-pub struct AppWindow(pub Arc<Window>);
-
-pub struct EngineRunner {
-    pub app: App,
+struct AnanthamHandler {
+    app: App,
     window: Option<Arc<Window>>,
 }
 
-impl EngineRunner {
-    pub fn new(app: App) -> Self {
-        Self { app, window: None }
-    }
-
-    pub fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let event_loop = EventLoop::new()?;
-        event_loop.set_control_flow(ControlFlow::Poll);
-        event_loop.run_app(&mut self)?;
-        Ok(())
-    }
-}
-
-impl ApplicationHandler for EngineRunner {
+impl ApplicationHandler for AnanthamHandler {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attributes = Window::default_attributes()
-                .with_title("Anantham Engine")
-                .with_fullscreen(Some(Fullscreen::Borderless(None)))
-                .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+            let attributes = Window::default_attributes().with_title("Anantham Engine");
 
             let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
-            let physical_size = window.inner_size();
-            self.app.main_world.insert_resource(ScreenResolution {
-                width: physical_size.width,
-                height: physical_size.height,
-            });
-
-            self.app
-                .render_world
-                .insert_resource(AppWindow(window.clone()));
+            self.app.insert_resource(AppWindow(window.clone()));
             self.window = Some(window);
-
-            tracing::info!("Window created and injected into Render World");
-        }
-    }
-
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    ) {
-        if let DeviceEvent::MouseMotion { delta } = event
-            && let Some(mut input) = self.app.main_world.get_resource_mut::<Input>()
-        {
-            input.add_mouse_delta(delta.0 as f32, delta.1 as f32);
         }
     }
 
@@ -106,6 +59,7 @@ impl ApplicationHandler for EngineRunner {
                     },
                 ..
             } => {
+                // 1. Handle Hardcoded Window Shortcuts (Escape to un-grab mouse)
                 if keycode == KeyCode::Escape
                     && state == ElementState::Pressed
                     && let Some(window) = &self.window
@@ -113,17 +67,25 @@ impl ApplicationHandler for EngineRunner {
                     let _ = window.set_cursor_grab(CursorGrabMode::None);
                     window.set_cursor_visible(true);
                 }
+
                 if keycode == KeyCode::F11
                     && state == ElementState::Pressed
                     && let Some(window) = &self.window
                 {
-                    if window.fullscreen().is_some() {
-                        window.set_fullscreen(None);
+                    let fullscreen = if window.fullscreen().is_some() {
+                        None
                     } else {
-                        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-                    }
+                        Some(Fullscreen::Borderless(None))
+                    };
+                    window.set_fullscreen(fullscreen);
                 }
-                if let Some(mut input) = self.app.main_world.get_resource_mut::<Input>() {
+
+                // 2. Forward raw input state directly into Bevy's native Input resource!
+                if let Some(mut input) = self
+                    .app
+                    .world_mut()
+                    .get_resource_mut::<ButtonInput<KeyCode>>()
+                {
                     match state {
                         ElementState::Pressed => input.press(keycode),
                         ElementState::Released => input.release(keycode),
@@ -132,17 +94,13 @@ impl ApplicationHandler for EngineRunner {
             }
 
             WindowEvent::Resized(physical_size) => {
-                if let Some(mut res) = self.app.main_world.get_resource_mut::<ScreenResolution>() {
+                if let Some(mut res) = self.app.world_mut().get_resource_mut::<ScreenResolution>() {
                     res.width = physical_size.width;
                     res.height = physical_size.height;
                 }
             }
 
             WindowEvent::RedrawRequested => {
-                // Execute the full game and render loop
-                self.app.update();
-
-                // Request the next frame immediately
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -150,4 +108,29 @@ impl ApplicationHandler for EngineRunner {
             _ => (),
         }
     }
+
+    // Triggered every frame when the OS event queue is empty
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            // Run Main ECS Logic
+            self.app.update();
+
+            // Extract changed data
+            self.app.world_mut().run_schedule(ExtractSchedule);
+
+            // Submit to Vulkan
+            self.app.world_mut().run_schedule(RenderSchedule);
+        }
+    }
+}
+
+pub fn anantham_winit_runner(app: App) -> AppExit {
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut runner = AnanthamHandler { app, window: None };
+
+    event_loop.run_app(&mut runner).unwrap();
+
+    AppExit::Success
 }

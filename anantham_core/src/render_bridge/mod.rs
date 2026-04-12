@@ -1,7 +1,7 @@
 pub mod components;
 pub mod extract;
 
-use crate::prelude::*;
+use crate::plugin_prelude::*;
 use bevy_ecs::schedule::ScheduleLabel;
 
 #[derive(ScheduleLabel, Debug, Hash, PartialEq, Eq, Clone)]
@@ -25,4 +25,8 @@ impl Plugin for RenderBridgePlugin {
             (extract::extract_chunk_meshes, extract::extract_camera_view),
         );
     }
+}
+
+pub mod prelude {
+    pub use super::components::*;
 }

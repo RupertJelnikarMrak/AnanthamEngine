@@ -13,3 +13,4 @@ bytemuck = { workspace = true }
 bevy_app = { workspace = true }
 bevy_tasks = { workspace = true }
 futures-lite = { workspace = true }
+bevy_input = { workspace = true }
