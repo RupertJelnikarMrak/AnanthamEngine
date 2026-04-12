@@ -1,26 +1,29 @@
-use anantham_core::{
-    App, BlockAttributes, BlockRegistry, Camera, EngineRunner, Input, LogPlugin, Transform,
-    chunk_meshing_system, extract_camera_system, extract_meshes_system,
-    voxel::{
-        ChunkManager,
-        chunk::{CHUNK_SIZE, Chunk, ChunkCoord, Remesh},
-    },
+use anantham_core::prelude::*;
+use anantham_core::voxel::chunk::{
+    CHUNK_SIZE, CHUNK_VOLUME, ChunkCoord, ChunkManager, NeedsMeshing, VoxelData,
 };
-use anantham_render::VoxelRenderPlugin;
-use bevy_ecs::prelude::*;
+use anantham_core::voxel::registry::{BlockAttributes, BlockRegistry};
+use anantham_render::RenderBackendPlugin;
 use glam::{IVec3, Quat, Vec3, Vec4};
 use noise::{Fbm, NoiseFn, Perlin};
 use std::collections::HashSet;
-use winit::keyboard::KeyCode;
+use std::sync::Arc;
+
+#[inline]
+fn voxel_index(x: usize, y: usize, z: usize) -> usize {
+    x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+}
 
 fn camera_movement_system(
-    mut input: ResMut<Input>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut query: Query<(&mut Transform, &mut Camera)>,
 ) {
     let mut move_speed = 0.2;
     let look_speed = 0.001;
 
-    let mouse_delta = input.take_mouse_delta();
+    // Note: anantham_core's handler.rs currently forwards Keyboards, but not MouseMotion yet.
+    // Replace this stub with an EventReader<MouseMotion> once added to the platform handler.
+    let mouse_delta = glam::Vec2::ZERO;
 
     for (mut transform, mut camera) in &mut query {
         camera.yaw -= mouse_delta.x * look_speed;
@@ -35,25 +38,25 @@ fn camera_movement_system(
         let right = transform.rotation * Vec3::X;
         let up = Vec3::Y;
 
-        if input.pressed(KeyCode::KeyW) {
+        if keyboard.pressed(KeyCode::KeyW) {
             velocity += forward;
         }
-        if input.pressed(KeyCode::KeyS) {
+        if keyboard.pressed(KeyCode::KeyS) {
             velocity -= forward;
         }
-        if input.pressed(KeyCode::KeyA) {
+        if keyboard.pressed(KeyCode::KeyA) {
             velocity -= right;
         }
-        if input.pressed(KeyCode::KeyD) {
+        if keyboard.pressed(KeyCode::KeyD) {
             velocity += right;
         }
-        if input.pressed(KeyCode::Space) {
+        if keyboard.pressed(KeyCode::Space) {
             velocity += up;
         }
-        if input.pressed(KeyCode::ControlLeft) {
+        if keyboard.pressed(KeyCode::ControlLeft) {
             velocity -= up;
         }
-        if input.pressed(KeyCode::ShiftLeft) {
+        if keyboard.pressed(KeyCode::ShiftLeft) {
             move_speed = 0.5;
         }
 
@@ -84,13 +87,16 @@ pub fn infinite_world_gen_system(
         for dx in -render_distance..=render_distance {
             for dz in -render_distance..=render_distance {
                 let chunk_coord = IVec3::new(current_chunk_x + dx, 0, current_chunk_z + dz);
-                chunks_in_range.insert(chunk_coord);
+                let coord_key = ChunkCoord(chunk_coord);
 
+                chunks_in_range.insert(coord_key);
+
+                // Use the Entry API to avoid double-hashing the coordinate
                 chunk_manager
                     .active_chunks
-                    .entry(chunk_coord)
+                    .entry(coord_key)
                     .or_insert_with(|| {
-                        let mut chunk = Chunk::empty();
+                        let mut voxels = [0u16; CHUNK_VOLUME];
 
                         let world_offset_x = chunk_coord.x * CHUNK_SIZE as i32;
                         let world_offset_z = chunk_coord.z * CHUNK_SIZE as i32;
@@ -108,11 +114,12 @@ pub fn infinite_world_gen_system(
 
                                 for y in 0..CHUNK_SIZE {
                                     let world_y = y as i32;
+                                    let idx = voxel_index(x, y, z);
 
                                     if world_y < terrain_height {
-                                        chunk.voxels[Chunk::index(x, y, z)] = 1; // Stone
+                                        voxels[idx] = 1; // Stone
                                     } else if world_y <= sea_level {
-                                        chunk.voxels[Chunk::index(x, y, z)] = 2; // Glass
+                                        voxels[idx] = 2; // Glass
                                     }
                                 }
                             }
@@ -120,20 +127,19 @@ pub fn infinite_world_gen_system(
 
                         newly_spawned.push(chunk_coord);
 
-                        // Spawn and return the Entity ID directly into the HashMap
+                        // Spawn into the ECS and return the Entity ID to be inserted into the HashMap
                         commands
                             .spawn((
-                                chunk,
-                                ChunkCoord(chunk_coord),
-                                Remesh,
+                                VoxelData(Arc::new(voxels)),
+                                coord_key,
+                                NeedsMeshing,
                                 Transform {
                                     translation: Vec3::new(
                                         world_offset_x as f32,
                                         0.0,
                                         world_offset_z as f32,
                                     ),
-                                    rotation: glam::Quat::IDENTITY,
-                                    scale: Vec3::ONE,
+                                    ..Default::default()
                                 },
                             ))
                             .id()
@@ -141,17 +147,18 @@ pub fn infinite_world_gen_system(
             }
         }
 
+        // Trigger meshing on neighbors of newly generated chunks
         for coord in newly_spawned {
             let neighbors = [
-                IVec3::new(coord.x - 1, 0, coord.z),
-                IVec3::new(coord.x + 1, 0, coord.z),
-                IVec3::new(coord.x, 0, coord.z - 1),
-                IVec3::new(coord.x, 0, coord.z + 1),
+                ChunkCoord(IVec3::new(coord.x - 1, 0, coord.z)),
+                ChunkCoord(IVec3::new(coord.x + 1, 0, coord.z)),
+                ChunkCoord(IVec3::new(coord.x, 0, coord.z - 1)),
+                ChunkCoord(IVec3::new(coord.x, 0, coord.z + 1)),
             ];
 
             for n_coord in neighbors {
                 if let Some(&n_entity) = chunk_manager.active_chunks.get(&n_coord) {
-                    commands.entity(n_entity).insert(Remesh);
+                    commands.entity(n_entity).insert(NeedsMeshing);
                 }
             }
         }
@@ -168,21 +175,9 @@ pub fn infinite_world_gen_system(
     });
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = App::new();
-
-    app.add_plugin(LogPlugin);
-    app.add_plugin(VoxelRenderPlugin);
-
-    let mut registry = BlockRegistry::new();
-
-    registry.register(
-        "core:air",
-        BlockAttributes {
-            is_transparent: true,
-            color: Vec4::ZERO,
-        },
-    );
+// Data initialization runs once at boot
+fn setup_blocks(mut registry: ResMut<BlockRegistry>) {
+    // Note: "air" (ID 0) is natively registered by BlockRegistry::new()
 
     registry.register(
         "core:stone",
@@ -199,41 +194,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             color: Vec4::new(0.8, 0.9, 1.0, 0.5),
         },
     );
+}
 
-    app.main_world.insert_resource(registry);
-    app.main_world.insert_resource(ChunkManager::default());
+fn main() -> AppExit {
+    let mut app = App::new();
 
-    // 2. Register Systems
-    app.main_schedule.add_systems(
-        (
-            camera_movement_system,
-            infinite_world_gen_system,
-            ApplyDeferred,
-            chunk_meshing_system,
-        )
-            .chain(),
-    );
+    // 1. Add Engine Plugins (Handles all scheduling, meshing threads, and Vulkan)
+    app.add_plugins(AnanthamCorePlugin);
+    app.add_plugins(RenderBackendPlugin);
 
-    app.add_extract_system(extract_camera_system);
-    app.add_extract_system(extract_meshes_system);
+    // 2. Register User Systems
+    app.add_systems(Startup, setup_blocks);
+    app.add_systems(Update, (camera_movement_system, infinite_world_gen_system));
 
-    app.main_world.spawn((
-        Camera {
-            fov: 1.57, // ~90 degrees
-            near: 0.1,
-            far: 1000.0,
-            pitch: 0.0,
-            yaw: 0.0,
-        },
-        Transform {
-            translation: Vec3::new(16.5, 17.0, 18.0),
-            rotation: Quat::IDENTITY,
-            scale: Vec3::ONE,
-        },
-    ));
-
-    let runner = EngineRunner::new(app);
-    runner.run()?;
-
-    Ok(())
+    // 3. Hand control over to the platform runner
+    app.run()
 }

@@ -2,10 +2,11 @@ use crate::core::{device::VulkanDevice, swapchain::SwapchainSetup, sync::SyncSet
 use crate::pipeline::{descriptor::DescriptorSetup, graphics::GraphicsPipelines};
 use crate::resource::{allocator::GpuAllocator, buffer::GeometryArena, texture::DepthTexture};
 
+use anantham_core::prelude::*;
 use anantham_core::render_bridge::components::{ExtractedMeshes, ExtractedView, Vertex};
 use ash::vk;
-use bevy_ecs::prelude::Resource;
 use glam::Mat4;
+use std::collections::HashMap;
 use std::error::Error;
 use winit::window::Window;
 
@@ -17,14 +18,25 @@ pub struct MeshPushConstants {
     pub _padding: [u32; 3],
 }
 
-struct FrameGeometry {
-    vertices: Vec<Vertex>,
-    opaque_draws: Vec<(Mat4, u32, u32)>,
-    transparent_draws: Vec<(Mat4, u32, u32)>,
+pub struct RenderChunkTracker {
+    pub opaque_offset: Option<u32>,
+    pub opaque_capacity: u32,
+    pub opaque_triangles: u32,
+
+    pub transparent_offset: Option<u32>,
+    pub transparent_capacity: u32,
+    pub transparent_triangles: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DrawCommand {
+    pub transform: Mat4,
+    pub vertex_offset: u32,
+    pub triangle_count: u32,
 }
 
 #[derive(Resource)]
-pub struct VulkanContext {
+pub struct RenderContext {
     pub vkd: VulkanDevice,
     pub swapchain: SwapchainSetup,
     pub sync: SyncSetup,
@@ -35,9 +47,11 @@ pub struct VulkanContext {
 
     pub descriptors: DescriptorSetup,
     pub pipelines: GraphicsPipelines,
+
+    pub chunk_directory: HashMap<Entity, RenderChunkTracker>,
 }
 
-impl VulkanContext {
+impl RenderContext {
     pub fn new(window: &Window) -> Result<Self, Box<dyn Error>> {
         tracing::debug!("Starting Vulkan boot sequence...");
 
@@ -80,6 +94,7 @@ impl VulkanContext {
             depth_texture,
             descriptors,
             pipelines,
+            chunk_directory: HashMap::new(),
         })
     }
 
@@ -88,120 +103,144 @@ impl VulkanContext {
         extracted_view: Option<&ExtractedView>,
         extracted_meshes: Option<&ExtractedMeshes>,
     ) -> Result<(), Box<dyn Error>> {
-        // 1. Prepare Data
-        let geometry_setup = Self::prepare_geometry(extracted_view, extracted_meshes);
-
-        // 2. Upload Buffer
-        self.upload_geometry(&geometry_setup.vertices);
-
-        // 3. Record & Submit Command Buffer
-        self.record_and_submit_commands(
-            extracted_view,
-            geometry_setup.opaque_draws,
-            geometry_setup.transparent_draws,
-        )?;
+        self.sync_geometry_arena(extracted_meshes);
+        let (opaque_draws, transparent_draws) = self.build_draw_commands(extracted_meshes);
+        self.record_and_submit_commands(extracted_view, opaque_draws, transparent_draws)?;
 
         Ok(())
     }
 
-    fn prepare_geometry(
-        extracted_view: Option<&ExtractedView>,
-        extracted_meshes: Option<&ExtractedMeshes>,
-    ) -> FrameGeometry {
-        let mut flattened_vertices = Vec::new();
-        let mut opaque_draw_commands = Vec::new();
-        let mut transparent_draw_commands = Vec::new();
+    /// Allocates space for new meshes and uploads them directly to VRAM.
+    fn sync_geometry_arena(&mut self, extracted_meshes: Option<&ExtractedMeshes>) {
+        let Some(meshes_res) = extracted_meshes else {
+            return;
+        };
 
-        if let Some(meshes_res) = extracted_meshes {
-            let mut current_offset = 0;
-            for mesh in &meshes_res.meshes {
-                // Pack Opaque
-                if !mesh.opaque_vertices.is_empty() {
-                    flattened_vertices.extend(&mesh.opaque_vertices);
-                    let triangle_count = (mesh.opaque_vertices.len() / 3) as u32;
-                    opaque_draw_commands.push((mesh.transform, current_offset, triangle_count));
-                    current_offset += mesh.opaque_vertices.len() as u32;
-                }
+        for chunk in &meshes_res.chunks {
+            let tracker = self
+                .chunk_directory
+                .entry(chunk.entity)
+                .or_insert(RenderChunkTracker {
+                    opaque_offset: None,
+                    opaque_capacity: 0,
+                    opaque_triangles: 0,
+                    transparent_offset: None,
+                    transparent_capacity: 0,
+                    transparent_triangles: 0,
+                });
 
-                // Pack Transparent (With Camera-Depth Sorting)
-                if !mesh.transparent_vertices.is_empty() {
-                    let cam_pos_world = extracted_view
-                        .map(|v| v.camera_position)
-                        .unwrap_or(glam::Vec3::ZERO);
+            // Opaque Memory Optimization
+            if let Some(new_opaque) = &chunk.new_opaque_vertices {
+                let size_bytes = (new_opaque.len() * std::mem::size_of::<Vertex>()) as u32;
 
-                    let local_cam_pos = mesh.transform.inverse().transform_point3(cam_pos_world);
+                if size_bytes == 0 {
+                    if let Some(old_offset) = tracker.opaque_offset {
+                        self.geometry_arena
+                            .free(old_offset, tracker.opaque_capacity);
+                    }
+                    tracker.opaque_offset = None;
+                    tracker.opaque_capacity = 0;
+                    tracker.opaque_triangles = 0;
+                } else {
+                    // Only re-allocate if the new mesh is larger than the existing block
+                    if size_bytes > tracker.opaque_capacity {
+                        if let Some(old_offset) = tracker.opaque_offset {
+                            self.geometry_arena
+                                .free(old_offset, tracker.opaque_capacity);
+                        }
+                        let offset = self
+                            .geometry_arena
+                            .allocate(size_bytes)
+                            .expect("FATAL: Geometry Arena Out Of Memory!");
 
-                    let mut triangles = Vec::with_capacity(mesh.transparent_vertices.len() / 3);
-                    for i in (0..mesh.transparent_vertices.len()).step_by(3) {
-                        let v0 = mesh.transparent_vertices[i];
-                        let v1 = mesh.transparent_vertices[i + 1];
-                        let v2 = mesh.transparent_vertices[i + 2];
-
-                        let centroid = (v0.position.truncate()
-                            + v1.position.truncate()
-                            + v2.position.truncate())
-                            / 3.0;
-                        let dist_sq = centroid.distance_squared(local_cam_pos);
-
-                        triangles.push(([v0, v1, v2], dist_sq));
+                        tracker.opaque_offset = Some(offset);
+                        tracker.opaque_capacity = size_bytes;
                     }
 
-                    triangles.sort_unstable_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-
-                    for (tri, _) in triangles {
-                        flattened_vertices.extend_from_slice(&tri);
-                    }
-
-                    let triangle_count = (mesh.transparent_vertices.len() / 3) as u32;
-                    transparent_draw_commands.push((
-                        mesh.transform,
-                        current_offset,
-                        triangle_count,
-                    ));
-                    current_offset += mesh.transparent_vertices.len() as u32;
+                    let byte_slice = bytemuck::cast_slice(new_opaque.as_slice());
+                    self.geometry_arena
+                        .upload(tracker.opaque_offset.unwrap(), byte_slice);
+                    tracker.opaque_triangles = (new_opaque.len() / 3) as u32;
                 }
             }
-        }
-        FrameGeometry {
-            vertices: flattened_vertices,
-            opaque_draws: opaque_draw_commands,
-            transparent_draws: transparent_draw_commands,
+
+            // Transparent Memory Optimization
+            if let Some(new_transparent) = &chunk.new_transparent_vertices {
+                let size_bytes = (new_transparent.len() * std::mem::size_of::<Vertex>()) as u32;
+
+                if size_bytes == 0 {
+                    if let Some(old_offset) = tracker.transparent_offset {
+                        self.geometry_arena
+                            .free(old_offset, tracker.transparent_capacity);
+                    }
+                    tracker.transparent_offset = None;
+                    tracker.transparent_capacity = 0;
+                    tracker.transparent_triangles = 0;
+                } else {
+                    if size_bytes > tracker.transparent_capacity {
+                        if let Some(old_offset) = tracker.transparent_offset {
+                            self.geometry_arena
+                                .free(old_offset, tracker.transparent_capacity);
+                        }
+                        let offset = self
+                            .geometry_arena
+                            .allocate(size_bytes)
+                            .expect("FATAL: Geometry Arena Out Of Memory!");
+
+                        tracker.transparent_offset = Some(offset);
+                        tracker.transparent_capacity = size_bytes;
+                    }
+
+                    let byte_slice = bytemuck::cast_slice(new_transparent.as_slice());
+                    self.geometry_arena
+                        .upload(tracker.transparent_offset.unwrap(), byte_slice);
+                    tracker.transparent_triangles = (new_transparent.len() / 3) as u32;
+                }
+            }
         }
     }
 
-    fn upload_geometry(&self, flattened_vertices: &[Vertex]) {
-        if flattened_vertices.is_empty() {
-            return;
-        }
+    /// Creates the lightweight draw commands for the command buffer
+    fn build_draw_commands(
+        &self,
+        extracted_meshes: Option<&ExtractedMeshes>,
+    ) -> (Vec<DrawCommand>, Vec<DrawCommand>) {
+        let mut opaque_draws = Vec::new();
+        let mut transparent_draws = Vec::new();
 
-        if let Some(alloc) = &self.geometry_arena.allocation
-            && let Some(mapped_ptr) = alloc.mapped_ptr()
-        {
-            let upload_size = std::mem::size_of_val(flattened_vertices);
+        if let Some(meshes_res) = extracted_meshes {
+            for chunk in &meshes_res.chunks {
+                if let Some(tracker) = self.chunk_directory.get(&chunk.entity) {
+                    if let Some(offset) = tracker.opaque_offset {
+                        // PushConstants expects the Vertex index, so we divide the byte offset by Vertex size
+                        let vertex_offset = offset / std::mem::size_of::<Vertex>() as u32;
+                        opaque_draws.push(DrawCommand {
+                            transform: chunk.transform,
+                            vertex_offset,
+                            triangle_count: tracker.opaque_triangles,
+                        });
+                    }
 
-            assert!(
-                upload_size <= alloc.size() as usize,
-                "FATAL: Vertex geometry ({upload_size} bytes) exceeded Vulkan buffer size ({} bytes)!",
-                alloc.size()
-            );
-
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    flattened_vertices.as_ptr() as *const u8,
-                    mapped_ptr.as_ptr() as *mut u8,
-                    upload_size,
-                );
+                    if let Some(offset) = tracker.transparent_offset {
+                        let vertex_offset = offset / std::mem::size_of::<Vertex>() as u32;
+                        transparent_draws.push(DrawCommand {
+                            transform: chunk.transform,
+                            vertex_offset,
+                            triangle_count: tracker.transparent_triangles,
+                        });
+                    }
+                }
             }
         }
+
+        (opaque_draws, transparent_draws)
     }
 
     fn record_and_submit_commands(
         &mut self,
         extracted_view: Option<&ExtractedView>,
-        opaque_draw_commands: Vec<(Mat4, u32, u32)>,
-        transparent_draw_commands: Vec<(Mat4, u32, u32)>,
+        opaque_draw_commands: Vec<DrawCommand>,
+        transparent_draw_commands: Vec<DrawCommand>,
     ) -> Result<(), Box<dyn Error>> {
         let device = &self.vkd.device;
         let swapchain_ext = &self.swapchain.ext;
@@ -340,10 +379,10 @@ impl VulkanContext {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipelines.opaque,
             );
-            for (model_matrix, vertex_offset, triangle_count) in opaque_draw_commands {
+            for cmd in opaque_draw_commands {
                 let push_constants = MeshPushConstants {
-                    mvp: view_proj * model_matrix,
-                    vertex_offset,
+                    mvp: view_proj * cmd.transform,
+                    vertex_offset: cmd.vertex_offset,
                     _padding: [0; 3],
                 };
                 let matrix_bytes = bytemuck::bytes_of(&push_constants);
@@ -356,7 +395,7 @@ impl VulkanContext {
                 );
                 self.vkd.mesh_ext.cmd_draw_mesh_tasks(
                     self.sync.command_buffer,
-                    triangle_count,
+                    cmd.triangle_count,
                     1,
                     1,
                 );
@@ -368,10 +407,10 @@ impl VulkanContext {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipelines.transparent,
             );
-            for (model_matrix, vertex_offset, triangle_count) in transparent_draw_commands {
+            for cmd in transparent_draw_commands {
                 let push_constants = MeshPushConstants {
-                    mvp: view_proj * model_matrix,
-                    vertex_offset,
+                    mvp: view_proj * cmd.transform,
+                    vertex_offset: cmd.vertex_offset,
                     _padding: [0; 3],
                 };
                 let matrix_bytes = bytemuck::bytes_of(&push_constants);
@@ -384,7 +423,7 @@ impl VulkanContext {
                 );
                 self.vkd.mesh_ext.cmd_draw_mesh_tasks(
                     self.sync.command_buffer,
-                    triangle_count,
+                    cmd.triangle_count,
                     1,
                     1,
                 );
@@ -435,7 +474,7 @@ impl VulkanContext {
     }
 }
 
-impl Drop for VulkanContext {
+impl Drop for RenderContext {
     fn drop(&mut self) {
         unsafe {
             let device = &self.vkd.device;

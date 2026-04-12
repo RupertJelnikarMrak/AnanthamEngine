@@ -1,4 +1,4 @@
-use crate::prelude::Resource;
+use crate::prelude::{Message, Resource};
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -19,4 +19,9 @@ impl ScreenResolution {
             self.width as f32 / self.height as f32
         }
     }
+}
+
+#[derive(Message, Debug, Clone, Copy, Default)]
+pub struct MouseMotion {
+    pub delta: glam::Vec2,
 }

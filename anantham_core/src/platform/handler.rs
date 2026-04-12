@@ -1,9 +1,9 @@
-use crate::platform::window::{AppWindow, ScreenResolution};
+use crate::platform::window::{AppWindow, MouseMotion, ScreenResolution};
 use crate::prelude::*;
 use crate::render_bridge::{ExtractSchedule, RenderSchedule};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -22,6 +22,27 @@ impl ApplicationHandler for AnanthamHandler {
 
             self.app.insert_resource(AppWindow(window.clone()));
             self.window = Some(window);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId, // Note: Capital 'I' for winit 0.30+
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            // In Bevy 0.18.1, buffered events are Messages.
+            // We fetch the Messages queue resource and push directly into it.
+            if let Some(mut mouse_messages) = self
+                .app
+                .world_mut()
+                .get_resource_mut::<Messages<MouseMotion>>()
+            {
+                mouse_messages.write(MouseMotion {
+                    delta: glam::Vec2::new(delta.0 as f32, delta.1 as f32),
+                });
+            }
         }
     }
 
@@ -80,7 +101,6 @@ impl ApplicationHandler for AnanthamHandler {
                     window.set_fullscreen(fullscreen);
                 }
 
-                // 2. Forward raw input state directly into Bevy's native Input resource!
                 if let Some(mut input) = self
                     .app
                     .world_mut()

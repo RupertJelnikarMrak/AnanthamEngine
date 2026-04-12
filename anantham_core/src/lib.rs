@@ -6,6 +6,7 @@ pub mod spatial;
 pub mod voxel;
 
 pub mod ecs_prelude {
+    pub use bevy_ecs;
     pub use bevy_ecs::prelude::*;
 
     pub use crate::spatial::prelude::{Camera, Transform};
@@ -17,6 +18,10 @@ pub mod ecs_prelude {
 
 pub mod plugin_prelude {
     pub use bevy_app::prelude::*;
+    pub use bevy_input::prelude::ButtonInput;
+
+    pub use winit::event::MouseButton;
+    pub use winit::keyboard::KeyCode;
 
     pub use crate::render_bridge::{ExtractSchedule, RenderSchedule};
 }
@@ -26,7 +31,6 @@ pub mod prelude {
     pub use super::plugin_prelude::*;
 
     pub use crate::platform::prelude::{AppWindow, ScreenResolution};
-    pub use bevy_input::prelude::*;
     pub use bevy_tasks::{AsyncComputeTaskPool, Task};
 
     pub use crate::plugin::AnanthamCorePlugin;
