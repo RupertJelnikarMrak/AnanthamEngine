@@ -21,6 +21,12 @@ bevy_app = "0.18.1"
 bevy_tasks = "0.18.1"
 futures-lite = "2.6.1"
 bevy_input = { version = "0.18.1", features = ["mouse", "keyboard"] }
+bevy_window = "0.18.1"
+bevy_winit = "0.18.1"
+leafwing-input-manager = "0.20.0"
+bevy-inspector-egui = "0.36.0"
+bevy_reflect = "0.18.1"
+bevy_transform = "0.18.1"
 
 [profile.dev.package."*"]
 opt-level = 3

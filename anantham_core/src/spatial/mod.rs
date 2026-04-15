@@ -1,18 +1,17 @@
-pub mod camera;
-pub mod transform;
+mod camera;
 
-pub mod prelude {
-    pub use super::camera::Camera;
-    pub use super::transform::Transform;
-}
+pub use camera::Camera;
 
-use crate::plugin_prelude::*;
-use crate::spatial::camera::spawn_initial_camera;
+use crate::app::{App, Plugin, Startup};
+use bevy_transform::TransformPlugin;
+use camera::spawn_initial_camera;
 
 pub struct SpatialDomainPlugin;
 
 impl Plugin for SpatialDomainPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(TransformPlugin);
+
         app.add_systems(Startup, spawn_initial_camera);
     }
 }

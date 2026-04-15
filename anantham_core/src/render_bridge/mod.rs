@@ -1,7 +1,7 @@
 pub mod components;
 pub mod extract;
 
-use crate::plugin_prelude::*;
+use crate::app::{App, Plugin};
 use bevy_ecs::schedule::ScheduleLabel;
 
 #[derive(ScheduleLabel, Debug, Hash, PartialEq, Eq, Clone)]

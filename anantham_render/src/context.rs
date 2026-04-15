@@ -5,7 +5,6 @@ use crate::resource::{allocator::GpuAllocator, buffer::GeometryArena, texture::D
 use anantham_core::prelude::*;
 use anantham_core::render_bridge::components::{ExtractedMeshes, ExtractedView, Vertex};
 use ash::vk;
-use glam::Mat4;
 use std::collections::HashMap;
 use std::error::Error;
 use winit::window::Window;
@@ -13,7 +12,7 @@ use winit::window::Window;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshPushConstants {
-    pub mvp: glam::Mat4,
+    pub mvp: Mat4,
     pub vertex_offset: u32,
     pub _padding: [u32; 3],
 }

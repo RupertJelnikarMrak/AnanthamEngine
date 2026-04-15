@@ -1,5 +1,5 @@
-use crate::prelude::*;
-use glam::Mat4;
+use crate::ecs::{Commands, Component};
+use crate::math::Mat4;
 
 #[derive(Component)]
 pub struct Camera {
@@ -40,7 +40,7 @@ pub fn spawn_initial_camera(mut commands: Commands) {
     commands.spawn((
         Camera::default(),
         Transform {
-            translation: glam::Vec3::new(16.0, 40.0, 16.0),
+            translation: Vec3::new(16.0, 40.0, 16.0),
             ..Default::default()
         },
     ));

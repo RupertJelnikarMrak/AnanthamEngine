@@ -1,3 +1,4 @@
+use crate::math::Vec4;
 use bevy_ecs::prelude::Resource;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 #[derive(Clone, Default, Debug)]
 pub struct BlockAttributes {
     pub is_transparent: bool,
-    pub color: glam::Vec4,
+    pub color: Vec4,
 }
 
 #[derive(Resource, Default)]
@@ -19,7 +20,7 @@ impl BlockRegistry {
         let mut reg = Self::default();
         Arc::make_mut(&mut reg.attributes).push(BlockAttributes {
             is_transparent: true,
-            color: glam::Vec4::ZERO,
+            color: Vec4::ZERO,
         });
         reg.name_to_id.insert("air".to_string(), 0);
         reg

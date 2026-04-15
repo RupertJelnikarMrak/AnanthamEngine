@@ -14,3 +14,10 @@ bevy_app = { workspace = true }
 bevy_tasks = { workspace = true }
 futures-lite = { workspace = true }
 bevy_input = { workspace = true }
+bevy_winit = { workspace = true }
+bevy_window = { workspace = true }
+leafwing-input-manager = { workspace = true }
+bevy_reflect = { workspace = true }
+bevy-inspector-egui = { workspace = true }
+bevy_transform = { workspace = true }
+bevy_math = "0.18.1"

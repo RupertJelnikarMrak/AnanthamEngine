@@ -1,6 +1,5 @@
-use crate::prelude::*;
+use crate::ecs::{Component, Resource};
 use crate::render_bridge::components::Vertex;
-use glam::IVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 

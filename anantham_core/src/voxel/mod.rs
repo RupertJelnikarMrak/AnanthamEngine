@@ -7,7 +7,7 @@ pub mod prelude {
     pub use super::registry::*;
 }
 
-use crate::plugin_prelude::*;
+use crate::app::{App, Plugin};
 
 pub struct VoxelDomainPlugin;
 

@@ -5,33 +5,32 @@ pub mod render_bridge;
 pub mod spatial;
 pub mod voxel;
 
-pub mod ecs_prelude {
-    pub use bevy_ecs;
-    pub use bevy_ecs::prelude::*;
-
-    pub use crate::spatial::prelude::{Camera, Transform};
-
-    pub use crate::render_bridge::components::{
-        ChunkMesh, ExtractedChunk, ExtractedMeshes, ExtractedView, Vertex,
-    };
-}
-
-pub mod plugin_prelude {
+pub mod app {
     pub use bevy_app::prelude::*;
-    pub use bevy_input::prelude::ButtonInput;
-
-    pub use winit::event::MouseButton;
-    pub use winit::keyboard::KeyCode;
-
-    pub use crate::render_bridge::{ExtractSchedule, RenderSchedule};
 }
 
-pub mod prelude {
-    pub use super::ecs_prelude::*;
-    pub use super::plugin_prelude::*;
+pub mod ecs {
+    pub use bevy_ecs::prelude::*;
+}
 
-    pub use crate::platform::prelude::{AppWindow, ScreenResolution};
+pub mod math {
+    pub use bevy_math::prelude::*;
+}
+
+pub mod input {
+    pub use bevy_input::prelude::*;
+    pub use leafwing_input_manager::prelude::*;
+}
+
+pub mod task {
     pub use bevy_tasks::{AsyncComputeTaskPool, Task};
+}
 
-    pub use crate::plugin::AnanthamCorePlugin;
+pub mod vendor {
+    pub use bevy_app;
+    pub use bevy_ecs;
+    pub use bevy_math;
+    pub use bevy_tasks;
+    pub use leafwing_input_manager;
+    pub use winit;
 }

@@ -1,10 +1,10 @@
+use anantham_core::platform::prelude::MouseMotion;
 use anantham_core::prelude::*;
 use anantham_core::voxel::chunk::{
     CHUNK_SIZE, CHUNK_VOLUME, ChunkCoord, ChunkManager, NeedsMeshing, VoxelData,
 };
 use anantham_core::voxel::registry::{BlockAttributes, BlockRegistry};
 use anantham_render::RenderBackendPlugin;
-use glam::{IVec3, Quat, Vec3, Vec4};
 use noise::{Fbm, NoiseFn, Perlin};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ fn voxel_index(x: usize, y: usize, z: usize) -> usize {
 
 fn camera_movement_system(
     keyboard: Res<ButtonInput<KeyCode>>,
+    mut mouse_events: EventReader<MouseMotion>,
     mut query: Query<(&mut Transform, &mut Camera)>,
 ) {
     let mut move_speed = 0.2;
@@ -23,14 +24,17 @@ fn camera_movement_system(
 
     // Note: anantham_core's handler.rs currently forwards Keyboards, but not MouseMotion yet.
     // Replace this stub with an EventReader<MouseMotion> once added to the platform handler.
-    let mouse_delta = glam::Vec2::ZERO;
+    let mouse_delta = Vec2::ZERO;
+    for event in mouse_events.read() {
+        mouse_delta += event.delta;
+    }
 
     for (mut transform, mut camera) in &mut query {
         camera.yaw -= mouse_delta.x * look_speed;
         camera.pitch -= mouse_delta.y * look_speed;
 
         camera.pitch = camera.pitch.clamp(-1.5, 1.5);
-        transform.rotation = Quat::from_euler(glam::EulerRot::YXZ, camera.yaw, camera.pitch, 0.0);
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, camera.yaw, camera.pitch, 0.0);
 
         let mut velocity = Vec3::ZERO;
 
@@ -196,6 +200,24 @@ fn setup_blocks(mut registry: ResMut<BlockRegistry>) {
     );
 }
 
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera {
+            fov: 1.57, // ~90 degrees
+            near: 0.1,
+            far: 1000.0,
+            pitch: 0.0,
+            yaw: 0.0,
+        },
+        Transform {
+            // Spawning you slightly above the sea level so you don't clip into the ground
+            translation: Vec3::new(16.5, 20.0, 18.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        },
+    ));
+}
+
 fn main() -> AppExit {
     let mut app = App::new();
 
@@ -205,6 +227,7 @@ fn main() -> AppExit {
 
     // 2. Register User Systems
     app.add_systems(Startup, setup_blocks);
+    app.add_systems(Startup, setup_camera);
     app.add_systems(Update, (camera_movement_system, infinite_world_gen_system));
 
     // 3. Hand control over to the platform runner

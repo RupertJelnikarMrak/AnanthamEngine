@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::ecs::Commands;
 use crate::render_bridge::components::{ChunkMesh, Vertex};
 use crate::voxel::chunk::{
     CHUNK_SIZE, ChunkCoord, ChunkManager, MeshedChunkData, MeshingTask, NeedsMeshing, VoxelData,
@@ -6,7 +6,6 @@ use crate::voxel::chunk::{
 use crate::voxel::registry::{BlockAttributes, BlockRegistry};
 use bevy_tasks::AsyncComputeTaskPool;
 use futures_lite::future;
-use glam::{Vec3, Vec4};
 use std::sync::Arc;
 
 #[inline]

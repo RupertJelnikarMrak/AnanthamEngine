@@ -1,5 +1,5 @@
+use crate::math::{Mat4, Vec3, Vec4};
 use bevy_ecs::prelude::{Component, Resource};
-use glam::{Mat4, Vec3, Vec4};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
